@@ -17,19 +17,19 @@ forum](https://tl.404connernotfound.dev).
 
 ```sh
 # Debug (for development and testing)
-cargo build --manifest-path crates/tinyone_core/Cargo.toml
+cargo build --manifest-path TinyOne/Cargo.toml
 
 # Release (for embedding; includes the sandbox worker)
-cargo build --release --manifest-path crates/tinyone_core/Cargo.toml
+cargo build --release --manifest-path TinyOne/Cargo.toml
 ```
 
 Output locations:
 
-| Platform | Debug                                               | Release                                               |
-| -------- | --------------------------------------------------- | ----------------------------------------------------- |
-| Linux    | `crates/tinyone_core/target/debug/libtinyone.so`    | `crates/tinyone_core/target/release/libtinyone.so`    |
-| macOS    | `crates/tinyone_core/target/debug/libtinyone.dylib` | `crates/tinyone_core/target/release/libtinyone.dylib` |
-| Windows  | `crates/tinyone_core/target/debug/tinyone.dll`      | `crates/tinyone_core/target/release/tinyone.dll`      |
+| Platform | Debug                                   | Release                                   |
+| -------- | --------------------------------------- | ----------------------------------------- |
+| Linux    | `TinyOne/target/debug/libtinyone.so`    | `TinyOne/target/release/libtinyone.so`    |
+| macOS    | `TinyOne/target/debug/libtinyone.dylib` | `TinyOne/target/release/libtinyone.dylib` |
+| Windows  | `TinyOne/target/debug/tinyone.dll`      | `TinyOne/target/release/tinyone.dll`      |
 
 The `tinyone-sandbox-worker` executable produced in the same target directory
 must be shipped beside the host executable (or configured with
@@ -63,10 +63,10 @@ ordinary header work.
 `TINYONE_ABI_VERSION` is the matching header constant. Both are `1` for the
 declared ABI.
 
-Before changing `crates/tinyone/src/ffi.rs` or `tinylang.h`, run:
+Before changing `TinyOne/src/ffi.rs` or `tinylang.h`, run:
 
 ```sh
-./scripts/check_abi_drift.sh
+./scripts/check-abi-drift.sh
 ```
 
 That command uses only Python's standard library and compares exported
@@ -74,13 +74,13 @@ That command uses only Python's standard library and compares exported
 available for review:
 
 ```sh
-uv run --no-project python tools/abi_manifest.py manifest
+uv run --no-project python Tools/abi_manifest.py manifest
 ```
 
 Header generation is optional and requires a local `cbindgen` binary:
 
 ```sh
-uv run --no-project python tools/abi_manifest.py generate-header --output tinylang.h
+uv run --no-project python Tools/abi_manifest.py generate-header --output tinylang.h
 ```
 
 If `cbindgen` is missing, the tool reports that explicitly and still supports
