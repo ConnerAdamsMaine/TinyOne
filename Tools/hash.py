@@ -1,422 +1,422 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-
+ 
 import argparse
 import fnmatch
 import glob
-import hashlib
-import json
-import os
-from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from textwrap import dedent
-from typing import Literal
-
-HashAlgorithm = Literal["sha256", "sha512", "blake2b", "md5"]
-OutputFormat = Literal["plain", "json", "release"]
-SymlinkPolicy = Literal["follow", "skip", "error"]
-Mode = Literal["file", "tree"]
-
-DEFAULT_CHUNK_SIZE = 1024 * 1024
-DEFAULT_ALGORITHM: HashAlgorithm = "sha256"
-EXIT_OK = 0
-EXIT_VERIFY_FAILED = 1
-EXIT_ERROR = 2
-TREE_FORMAT_VERSION = b"hash-tool-tree-v1\0"
-DEFAULT_EXCLUDE_PATTERNS = (
-    ".git",
-    "TinyOne/target",
-    "Ralloc/target",
-    "target",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".venv",
-    "venv",
-    "build",
-    "dist",
-    ".agents",
-    ".codex",
-)
-HELP_EPILOG = """
-Examples:
-  python3 Tools/hash.py README.rst
-  python3 Tools/hash.py -a sha256 --format release --name TinyOne TinyOne/Cargo.toml
-  ./hash.py --tree . --exclude manifest.json --symlinks skip --format json > manifest.json
-  ./hash.py --tree . --format json --list-files > manifest.json
-  ./hash.py --expected <digest> README.rst
-  ./hash.py --check manifest.json
-
-Modes:
-  File mode is the default. Pass one or more file paths.
-  Tree mode uses --tree DIR and hashes every included file into one stable digest.
-  Verify mode uses --expected DIGEST FILE or --check manifest.json.
-
-Output formats:
-  plain    "<digest>  <path>" lines, like common checksum tools.
-  json     machine-readable HashResult records.
-  release  markdown bullets for release notes.
-  Use --list-files with --tree to include per-file path, size, algorithm, and digest details.
-
-Exit codes:
-  0  success or all verification entries passed.
-  1  at least one verification entry failed.
-  2  usage, manifest, file, or hashing error.
-"""
-
-
-@dataclass(frozen=True)
-class TreeFileHash:
-    path: str
-    size: int
-    algorithm: HashAlgorithm
-    digest: str
-
-
-@dataclass(frozen=True)
-class HashResult:
-    mode: Mode
-    name: str
-    path: str
-    algorithm: HashAlgorithm
-    digest: str
-    files_hashed: int | None = None
-    include_suffixes: tuple[str, ...] | None = None
-    exclude_patterns: tuple[str, ...] | None = None
-    symlink_policy: SymlinkPolicy | None = None
-    files: tuple[TreeFileHash, ...] | None = None
-
-
-@dataclass(frozen=True)
-class VerificationResult:
-    mode: Mode
-    path: str
-    algorithm: HashAlgorithm
-    expected: str
-    actual: str | None
-    ok: bool
-    message: str = ""
-    expected_files_hashed: int | None = None
-    actual_files_hashed: int | None = None
-
-
-def normalize_algorithm(value: str) -> HashAlgorithm:
-    match value.lower():
-        case "sha256":
-            return "sha256"
-        case "sha512":
-            return "sha512"
-        case "blake2b":
-            return "blake2b"
-        case "md5":
-            return "md5"
-        case _:
-            raise argparse.ArgumentTypeError(f"unsupported algorithm: {value}")
-
-
-def new_hasher(algorithm: HashAlgorithm) -> hashlib._Hash:
-    match algorithm:
-        case "sha256":
-            return hashlib.sha256()
-        case "sha512":
-            return hashlib.sha512()
-        case "blake2b":
-            return hashlib.blake2b()
-        case "md5":
-            return hashlib.md5(usedforsecurity=False)
-
-
-def parse_chunk_size(value: str) -> int:
-    units = {
-        "b": 1,
-        "k": 1024,
-        "kb": 1024,
-        "m": 1024**2,
-        "mb": 1024**2,
-        "g": 1024**3,
-        "gb": 1024**3,
-    }
-
-    raw = value.strip().lower()
-    if not raw:
-        raise argparse.ArgumentTypeError("chunk size cannot be empty")
-
-    for suffix in sorted(units, key=len, reverse=True):
-        if raw.endswith(suffix):
-            number = raw[: -len(suffix)].strip()
-            multiplier = units[suffix]
-            break
-    else:
-        number = raw
-        multiplier = 1
-
-    if not number:
-        raise argparse.ArgumentTypeError(f"invalid chunk size: {value}")
-
-    try:
-        parsed = int(number) * multiplier
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"invalid chunk size: {value}") from exc
-
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("chunk size must be greater than zero")
-
-    return parsed
-
-
-def normalize_suffixes(values: Sequence[str]) -> frozenset[str]:
-    suffixes: set[str] = set()
-
-    for value in values:
-        suffix = value.strip().lower()
-        if not suffix:
-            raise argparse.ArgumentTypeError("include suffix cannot be empty")
-        if not suffix.startswith("."):
-            suffix = f".{suffix}"
-        suffixes.add(suffix)
-
-    return frozenset(suffixes)
-
-
-def normalize_exclude_patterns(values: Sequence[str]) -> tuple[str, ...]:
-    patterns: list[str] = []
-
-    for value in values:
-        pattern = value.strip().replace("\\", "/")
-        while pattern.startswith("./"):
-            pattern = pattern[2:]
-        pattern = pattern.strip("/")
-        if not pattern:
-            raise argparse.ArgumentTypeError("exclude pattern cannot be empty")
-        patterns.append(pattern)
-
-    return tuple(dict.fromkeys(patterns))
-
-
-def normalize_digest(value: str) -> str:
-    digest = value.strip().lower()
-    if not digest:
-        raise ValueError("digest cannot be empty")
-    try:
-        bytes.fromhex(digest)
-    except ValueError as exc:
-        raise ValueError(f"digest must be hexadecimal: {value}") from exc
-    return digest
-
-
-def normalize_symlink_policy(value: object) -> SymlinkPolicy:
-    if value == "follow":
-        return "follow"
-    if value == "skip":
-        return "skip"
-    if value == "error":
-        return "error"
-    raise ValueError(f"unsupported symlink policy: {value}")
-
-
-def defaulted_exclude_patterns(
-    user_patterns: Sequence[str],
-    *,
-    use_defaults: bool,
-) -> tuple[str, ...]:
-    base = DEFAULT_EXCLUDE_PATTERNS if use_defaults else ()
-    return normalize_exclude_patterns((*base, *user_patterns))
-
-
-def encode_u64(value: int) -> bytes:
-    if value < 0:
-        raise ValueError("cannot encode negative integer")
-    return value.to_bytes(8, "big")
-
-
-def update_framed(hasher: hashlib._Hash, payload: bytes) -> None:
-    hasher.update(encode_u64(len(payload)))
-    hasher.update(payload)
-
-
-def hash_file(path: Path, algorithm: HashAlgorithm, chunk_size: int) -> str:
-    if path.is_symlink():
-        # File mode follows Path.open() behavior by default at the CLI layer.
-        # The check is kept here only to avoid hiding unexpected broken links.
-        if not path.exists():
-            raise FileNotFoundError(path)
-
-    hasher = new_hasher(algorithm)
-
-    with path.open("rb") as file:
-        while True:
-            chunk = file.read(chunk_size)
-            if not chunk:
-                break
-            hasher.update(chunk)
-
-    return hasher.hexdigest()
-
-
-def should_include_file(path: Path, include_suffixes: frozenset[str]) -> bool:
-    if not include_suffixes:
-        return True
-    return path.suffix.lower() in include_suffixes
-
-
-def path_matches_pattern(relative_path: str, pattern: str) -> bool:
-    components = relative_path.split("/")
-    if pattern.endswith("/**"):
-        pattern = pattern[:-3]
-    if pattern.endswith("/*"):
-        pattern = pattern[:-2]
-    if "/" not in pattern:
-        return any(fnmatch.fnmatchcase(component, pattern) for component in components)
-    return (
-        relative_path == pattern
-        or relative_path.startswith(f"{pattern}/")
-        or fnmatch.fnmatchcase(relative_path, pattern)
-    )
-
-
-def should_exclude_path(root: Path, path: Path, exclude_patterns: Sequence[str]) -> bool:
-    if not exclude_patterns:
-        return False
-    relative_path = path.relative_to(root).as_posix()
-    return any(path_matches_pattern(relative_path, pattern) for pattern in exclude_patterns)
-
-
-def iter_tree_files(
-    root: Path,
-    include_suffixes: frozenset[str],
-    exclude_patterns: Sequence[str],
-    symlinks: SymlinkPolicy,
-) -> Iterable[Path]:
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=(symlinks == "follow")):
-        current_dir = Path(dirpath)
-
-        retained_dirnames: list[str] = []
-        for dirname in dirnames:
-            child = current_dir / dirname
-            if should_exclude_path(root, child, exclude_patterns):
-                continue
-            if child.is_symlink() and symlinks in {"skip", "error"}:
-                if symlinks == "error":
-                    raise RuntimeError(f"symlinked directory encountered: {child}")
-                continue
-            retained_dirnames.append(dirname)
-        dirnames[:] = retained_dirnames
-
-        for filename in filenames:
-            path = current_dir / filename
-
-            if should_exclude_path(root, path, exclude_patterns):
-                continue
-            if path.is_symlink():
-                if symlinks == "error":
-                    raise RuntimeError(f"symlinked file encountered: {path}")
-                if symlinks == "skip":
-                    continue
-
-            if path.is_file() and should_include_file(path, include_suffixes):
-                yield path
-
-
-def hash_tree_manifest(
-    root: Path,
-    algorithm: HashAlgorithm,
-    chunk_size: int,
-    include_suffixes: frozenset[str],
-    exclude_patterns: Sequence[str],
-    symlinks: SymlinkPolicy,
-) -> tuple[str, tuple[TreeFileHash, ...]]:
-    files = sorted(
-        iter_tree_files(root, include_suffixes, exclude_patterns, symlinks),
-        key=lambda p: p.relative_to(root).as_posix(),
-    )
-
-    if not files:
-        suffix_msg = "" if not include_suffixes else f" matching {sorted(include_suffixes)}"
-        raise ValueError(f"no{suffix_msg} files under {root}")
-
-    hasher = new_hasher(algorithm)
-    hasher.update(TREE_FORMAT_VERSION)
-    update_framed(hasher, algorithm.encode("ascii"))
-    hasher.update(encode_u64(len(files)))
-
-    file_hashes: list[TreeFileHash] = []
-    for path in files:
-        relative_path = path.relative_to(root).as_posix()
-        rel = relative_path.encode("utf-8")
-        digest_hex = hash_file(path, algorithm, chunk_size)
-        digest_bytes = bytes.fromhex(digest_hex)
-        file_hashes.append(
-            TreeFileHash(
-                path=relative_path,
-                size=path.stat().st_size,
-                algorithm=algorithm,
-                digest=digest_hex,
-            )
-        )
-
-        update_framed(hasher, rel)
-        update_framed(hasher, digest_bytes)
-
-    return hasher.hexdigest(), tuple(file_hashes)
-
-
-def hash_tree(
-    root: Path,
-    algorithm: HashAlgorithm,
-    chunk_size: int,
-    include_suffixes: frozenset[str],
-    exclude_patterns: Sequence[str],
-    symlinks: SymlinkPolicy,
-) -> tuple[str, int]:
-    digest, files = hash_tree_manifest(
-        root,
-        algorithm,
-        chunk_size,
-        include_suffixes,
-        exclude_patterns,
-        symlinks,
-    )
-    return digest, len(files)
-
-
-def name_for_path(path: Path, explicit_name: str | None) -> str:
-    if explicit_name is not None:
-        stripped = explicit_name.strip()
-        if not stripped:
-            raise ValueError("name cannot be empty")
-        return stripped
-    return path.name or path.resolve().name
-
-
-def build_file_results(
-    paths: Sequence[Path],
-    algorithm: HashAlgorithm,
-    chunk_size: int,
-    name: str | None,
-) -> list[HashResult]:
-    if name is not None and len(paths) != 1:
-        raise ValueError("--name can only be used with one file path")
-
-    results: list[HashResult] = []
-    for path in paths:
-        if not path.is_file():
-            raise ValueError(f"not a file: {path}")
-
-        results.append(
-            HashResult(
-                mode="file",
-                name=name_for_path(path, name),
-                path=str(path),
-                algorithm=algorithm,
-                digest=hash_file(path, algorithm, chunk_size),
-            )
-        )
-
-    return results
-
-
+ import hashlib
+ import json
+ import os
+ from collections.abc import Iterable, Sequence
+ from dataclasses import asdict, dataclass
+ from pathlib import Path
+ from textwrap import dedent
+ from typing import Literal
+ 
+ HashAlgorithm = Literal["sha256", "sha512", "blake2b", "md5"]
+ OutputFormat = Literal["plain", "json", "release"]
+ SymlinkPolicy = Literal["follow", "skip", "error"]
+ Mode = Literal["file", "tree"]
+ 
+ DEFAULT_CHUNK_SIZE = 1024 * 1024
+ DEFAULT_ALGORITHM: HashAlgorithm = "sha256"
+ EXIT_OK = 0
+ EXIT_VERIFY_FAILED = 1
+ EXIT_ERROR = 2
+ TREE_FORMAT_VERSION = b"hash-tool-tree-v1\0"
+ DEFAULT_EXCLUDE_PATTERNS = (
+     ".git",
+     "TinyOne/target",
+     "Ralloc/target",
+     "target",
+     "__pycache__",
+     ".pytest_cache",
+     ".mypy_cache",
+     ".ruff_cache",
+     ".venv",
+     "venv",
+     "build",
+     "dist",
+     ".agents",
+     ".codex",
+ )
+ HELP_EPILOG = """
+ Examples:
+   python3 Tools/hash.py README.rst
+   python3 Tools/hash.py -a sha256 --format release --name TinyOne TinyOne/Cargo.toml
+   ./hash.py --tree . --exclude manifest.json --symlinks skip --format json > manifest.json
+   ./hash.py --tree . --format json --list-files > manifest.json
+   ./hash.py --expected <digest> README.rst
+   ./hash.py --check manifest.json
+ 
+ Modes:
+   File mode is the default. Pass one or more file paths.
+   Tree mode uses --tree DIR and hashes every included file into one stable digest.
+   Verify mode uses --expected DIGEST FILE or --check manifest.json.
+ 
+ Output formats:
+   plain    "<digest>  <path>" lines, like common checksum tools.
+   json     machine-readable HashResult records.
+   release  markdown bullets for release notes.
+   Use --list-files with --tree to include per-file path, size, algorithm, and digest details.
+ 
+ Exit codes:
+   0  success or all verification entries passed.
+   1  at least one verification entry failed.
+   2  usage, manifest, file, or hashing error.
+ """
+ 
+ 
+ @dataclass(frozen=True)
+ class TreeFileHash:
+     path: str
+     size: int
+     algorithm: HashAlgorithm
+     digest: str
+ 
+ 
+ @dataclass(frozen=True)
+ class HashResult:
+     mode: Mode
+     name: str
+     path: str
+     algorithm: HashAlgorithm
+     digest: str
+     files_hashed: int | None = None
+     include_suffixes: tuple[str, ...] | None = None
+     exclude_patterns: tuple[str, ...] | None = None
+     symlink_policy: SymlinkPolicy | None = None
+     files: tuple[TreeFileHash, ...] | None = None
+ 
+ 
+ @dataclass(frozen=True)
+ class VerificationResult:
+     mode: Mode
+     path: str
+     algorithm: HashAlgorithm
+     expected: str
+     actual: str | None
+     ok: bool
+     message: str = ""
+     expected_files_hashed: int | None = None
+     actual_files_hashed: int | None = None
+ 
+ 
+ def normalize_algorithm(value: str) -> HashAlgorithm:
+     match value.lower():
+         case "sha256":
+             return "sha256"
+         case "sha512":
+             return "sha512"
+         case "blake2b":
+             return "blake2b"
+         case "md5":
+             return "md5"
+         case _:
+             raise argparse.ArgumentTypeError(f"unsupported algorithm: {value}")
+ 
+ 
+ def new_hasher(algorithm: HashAlgorithm) -> hashlib._Hash:
+     match algorithm:
+         case "sha256":
+             return hashlib.sha256()
+         case "sha512":
+             return hashlib.sha512()
+         case "blake2b":
+             return hashlib.blake2b()
+         case "md5":
+             return hashlib.md5(usedforsecurity=False)
+ 
+ 
+ def parse_chunk_size(value: str) -> int:
+     units = {
+         "b": 1,
+         "k": 1024,
+         "kb": 1024,
+         "m": 1024**2,
+         "mb": 1024**2,
+         "g": 1024**3,
+         "gb": 1024**3,
+     }
+ 
+     raw = value.strip().lower()
+     if not raw:
+         raise argparse.ArgumentTypeError("chunk size cannot be empty")
+ 
+     for suffix in sorted(units, key=len, reverse=True):
+         if raw.endswith(suffix):
+             number = raw[: -len(suffix)].strip()
+             multiplier = units[suffix]
+             break
+     else:
+         number = raw
+         multiplier = 1
+ 
+     if not number:
+         raise argparse.ArgumentTypeError(f"invalid chunk size: {value}")
+ 
+     try:
+         parsed = int(number) * multiplier
+     except ValueError as exc:
+         raise argparse.ArgumentTypeError(f"invalid chunk size: {value}") from exc
+ 
+     if parsed <= 0:
+         raise argparse.ArgumentTypeError("chunk size must be greater than zero")
+ 
+     return parsed
+ 
+ 
+ def normalize_suffixes(values: Sequence[str]) -> frozenset[str]:
+     suffixes: set[str] = set()
+ 
+     for value in values:
+         suffix = value.strip().lower()
+         if not suffix:
+             raise argparse.ArgumentTypeError("include suffix cannot be empty")
+         if not suffix.startswith("."):
+             suffix = f".{suffix}"
+         suffixes.add(suffix)
+ 
+     return frozenset(suffixes)
+ 
+ 
+ def normalize_exclude_patterns(values: Sequence[str]) -> tuple[str, ...]:
+     patterns: list[str] = []
+ 
+     for value in values:
+         pattern = value.strip().replace("\\", "/")
+         while pattern.startswith("./"):
+             pattern = pattern[2:]
+         pattern = pattern.strip("/")
+         if not pattern:
+             raise argparse.ArgumentTypeError("exclude pattern cannot be empty")
+         patterns.append(pattern)
+ 
+     return tuple(dict.fromkeys(patterns))
+ 
+ 
+ def normalize_digest(value: str) -> str:
+     digest = value.strip().lower()
+     if not digest:
+         raise ValueError("digest cannot be empty")
+     try:
+         bytes.fromhex(digest)
+     except ValueError as exc:
+         raise ValueError(f"digest must be hexadecimal: {value}") from exc
+     return digest
+ 
+ 
+ def normalize_symlink_policy(value: object) -> SymlinkPolicy:
+     if value == "follow":
+         return "follow"
+     if value == "skip":
+         return "skip"
+     if value == "error":
+         return "error"
+     raise ValueError(f"unsupported symlink policy: {value}")
+ 
+ 
+ def defaulted_exclude_patterns(
+     user_patterns: Sequence[str],
+     *,
+     use_defaults: bool,
+ ) -> tuple[str, ...]:
+     base = DEFAULT_EXCLUDE_PATTERNS if use_defaults else ()
+     return normalize_exclude_patterns((*base, *user_patterns))
+ 
+ 
+ def encode_u64(value: int) -> bytes:
+     if value < 0:
+         raise ValueError("cannot encode negative integer")
+     return value.to_bytes(8, "big")
+ 
+ 
+ def update_framed(hasher: hashlib._Hash, payload: bytes) -> None:
+     hasher.update(encode_u64(len(payload)))
+     hasher.update(payload)
+ 
+ 
+ def hash_file(path: Path, algorithm: HashAlgorithm, chunk_size: int) -> str:
+     if path.is_symlink():
+         # File mode follows Path.open() behavior by default at the CLI layer.
+         # The check is kept here only to avoid hiding unexpected broken links.
+         if not path.exists():
+             raise FileNotFoundError(path)
+ 
+     hasher = new_hasher(algorithm)
+ 
+     with path.open("rb") as file:
+         while True:
+             chunk = file.read(chunk_size)
+             if not chunk:
+                 break
+             hasher.update(chunk)
+ 
+     return hasher.hexdigest()
+ 
+ 
+ def should_include_file(path: Path, include_suffixes: frozenset[str]) -> bool:
+     if not include_suffixes:
+         return True
+     return path.suffix.lower() in include_suffixes
+ 
+ 
+ def path_matches_pattern(relative_path: str, pattern: str) -> bool:
+     components = relative_path.split("/")
+     if pattern.endswith("/**"):
+         pattern = pattern[:-3]
+     if pattern.endswith("/*"):
+         pattern = pattern[:-2]
+     if "/" not in pattern:
+         return any(fnmatch.fnmatchcase(component, pattern) for component in components)
+     return (
+         relative_path == pattern
+         or relative_path.startswith(f"{pattern}/")
+         or fnmatch.fnmatchcase(relative_path, pattern)
+     )
+ 
+ 
+ def should_exclude_path(root: Path, path: Path, exclude_patterns: Sequence[str]) -> bool:
+     if not exclude_patterns:
+         return False
+     relative_path = path.relative_to(root).as_posix()
+     return any(path_matches_pattern(relative_path, pattern) for pattern in exclude_patterns)
+ 
+ 
+ def iter_tree_files(
+     root: Path,
+     include_suffixes: frozenset[str],
+     exclude_patterns: Sequence[str],
+     symlinks: SymlinkPolicy,
+ ) -> Iterable[Path]:
+     for dirpath, dirnames, filenames in os.walk(root, followlinks=(symlinks == "follow")):
+         current_dir = Path(dirpath)
+ 
+         retained_dirnames: list[str] = []
+         for dirname in dirnames:
+             child = current_dir / dirname
+             if should_exclude_path(root, child, exclude_patterns):
+                 continue
+             if child.is_symlink() and symlinks in {"skip", "error"}:
+                 if symlinks == "error":
+                     raise RuntimeError(f"symlinked directory encountered: {child}")
+                 continue
+             retained_dirnames.append(dirname)
+         dirnames[:] = retained_dirnames
+ 
+         for filename in filenames:
+             path = current_dir / filename
+ 
+             if should_exclude_path(root, path, exclude_patterns):
+                 continue
+             if path.is_symlink():
+                 if symlinks == "error":
+                     raise RuntimeError(f"symlinked file encountered: {path}")
+                 if symlinks == "skip":
+                     continue
+ 
+             if path.is_file() and should_include_file(path, include_suffixes):
+                 yield path
+ 
+ 
+ def hash_tree_manifest(
+     root: Path,
+     algorithm: HashAlgorithm,
+     chunk_size: int,
+     include_suffixes: frozenset[str],
+     exclude_patterns: Sequence[str],
+     symlinks: SymlinkPolicy,
+ ) -> tuple[str, tuple[TreeFileHash, ...]]:
+     files = sorted(
+         iter_tree_files(root, include_suffixes, exclude_patterns, symlinks),
+         key=lambda p: p.relative_to(root).as_posix(),
+     )
+ 
+     if not files:
+         suffix_msg = "" if not include_suffixes else f" matching {sorted(include_suffixes)}"
+         raise ValueError(f"no{suffix_msg} files under {root}")
+ 
+     hasher = new_hasher(algorithm)
+     hasher.update(TREE_FORMAT_VERSION)
+     update_framed(hasher, algorithm.encode("ascii"))
+     hasher.update(encode_u64(len(files)))
+ 
+     file_hashes: list[TreeFileHash] = []
+     for path in files:
+         relative_path = path.relative_to(root).as_posix()
+         rel = relative_path.encode("utf-8")
+         digest_hex = hash_file(path, algorithm, chunk_size)
+         digest_bytes = bytes.fromhex(digest_hex)
+         file_hashes.append(
+             TreeFileHash(
+                 path=relative_path,
+                 size=path.stat().st_size,
+                 algorithm=algorithm,
+                 digest=digest_hex,
+             )
+         )
+ 
+         update_framed(hasher, rel)
+         update_framed(hasher, digest_bytes)
+ 
+     return hasher.hexdigest(), tuple(file_hashes)
+ 
+ 
+ def hash_tree(
+     root: Path,
+     algorithm: HashAlgorithm,
+     chunk_size: int,
+     include_suffixes: frozenset[str],
+     exclude_patterns: Sequence[str],
+     symlinks: SymlinkPolicy,
+ ) -> tuple[str, int]:
+     digest, files = hash_tree_manifest(
+         root,
+         algorithm,
+         chunk_size,
+         include_suffixes,
+         exclude_patterns,
+         symlinks,
+     )
+     return digest, len(files)
+ 
+ 
+ def name_for_path(path: Path, explicit_name: str | None) -> str:
+     if explicit_name is not None:
+         stripped = explicit_name.strip()
+         if not stripped:
+             raise ValueError("name cannot be empty")
+         return stripped
+     return path.name or path.resolve().name
+ 
+ 
+ def build_file_results(
+     paths: Sequence[Path],
+     algorithm: HashAlgorithm,
+     chunk_size: int,
+     name: str | None,
+ ) -> list[HashResult]:
+     if name is not None and len(paths) != 1:
+         raise ValueError("--name can only be used with one file path")
+ 
+     results: list[HashResult] = []
+     for path in paths:
+         if not path.is_file():
+             raise ValueError(f"not a file: {path}")
+ 
+         results.append(
+             HashResult(
+                 mode="file",
+                 name=name_for_path(path, name),
+                 path=str(path),
+                 algorithm=algorithm,
+                 digest=hash_file(path, algorithm, chunk_size),
+             )
+         )
+ 
+     return results
+ 
+ 
 def expand_file_paths(paths: Sequence[Path]) -> list[Path]:
     """Expand shell-style file globs for shells that do not do it for us.
 
@@ -437,41 +437,42 @@ def expand_file_paths(paths: Sequence[Path]) -> list[Path]:
     return expanded
 
 
+
 def build_tree_result(
-    root: Path,
-    algorithm: HashAlgorithm,
-    chunk_size: int,
-    include_suffixes: frozenset[str],
-    exclude_patterns: Sequence[str],
-    symlinks: SymlinkPolicy,
-    name: str | None,
-    list_files: bool,
-) -> HashResult:
-    if not root.is_dir():
-        raise ValueError(f"not a directory: {root}")
-
-    digest, files = hash_tree_manifest(
-        root,
-        algorithm,
-        chunk_size,
-        include_suffixes,
-        exclude_patterns,
-        symlinks,
-    )
-    return HashResult(
-        mode="tree",
-        name=name_for_path(root, name),
-        path=str(root),
-        algorithm=algorithm,
-        digest=digest,
-        files_hashed=len(files),
-        include_suffixes=tuple(sorted(include_suffixes)),
-        exclude_patterns=tuple(exclude_patterns),
-        symlink_policy=symlinks,
-        files=files if list_files else None,
-    )
-
-
+     root: Path,
+     algorithm: HashAlgorithm,
+     chunk_size: int,
+     include_suffixes: frozenset[str],
+     exclude_patterns: Sequence[str],
+     symlinks: SymlinkPolicy,
+     name: str | None,
+     list_files: bool,
+ ) -> HashResult:
+     if not root.is_dir():
+         raise ValueError(f"not a directory: {root}")
+ 
+     digest, files = hash_tree_manifest(
+         root,
+         algorithm,
+         chunk_size,
+         include_suffixes,
+         exclude_patterns,
+         symlinks,
+     )
+     return HashResult(
+         mode="tree",
+         name=name_for_path(root, name),
+         path=str(root),
+         algorithm=algorithm,
+         digest=digest,
+         files_hashed=len(files),
+         include_suffixes=tuple(sorted(include_suffixes)),
+         exclude_patterns=tuple(exclude_patterns),
+         symlink_policy=symlinks,
+         files=files if list_files else None,
+     )
+ 
+ 
 def render_plain(results: Sequence[HashResult]) -> str:
     lines: list[str] = []
     for result in results:
@@ -984,7 +985,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not args.paths:
                 raise ValueError("at least one file path is required unless --tree is used")
             results = build_file_results(
-                paths=expand_file_paths(args.paths),
+               paths=expand_file_paths(args.paths),
                 algorithm=algorithm,
                 chunk_size=args.chunk_size,
                 name=args.name,
