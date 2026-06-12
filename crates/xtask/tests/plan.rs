@@ -30,6 +30,7 @@ fn command_plans_use_current_repo_paths() {
     assert!(hooks.iter().any(|cmd| cmd.contains("--features testing-hooks")));
 
     let tools = plan_for(Task::ToolsTest).render_commands();
+    assert!(tools.iter().all(|cmd| cmd.starts_with("uv run --no-project python ")));
     assert!(tools.iter().any(|cmd| cmd.contains("tools.test_abi_manifest")));
     assert!(tools.iter().any(|cmd| cmd.contains("tools.test_hash")));
     assert!(tools.iter().any(|cmd| cmd.contains("tools.test_loc")));

@@ -6,6 +6,11 @@ cd "$ROOT_DIR"
 
 MANIFEST="crates/tinyone_core/Cargo.toml"
 TIMEOUT_SECONDS="${CI_GATE_TIMEOUT_SECONDS:-300}"
+# crates/tinyone_core/target/release/tinylang_bench
+# TARGET_DIR="${CARGO_TARGET_DIR:-TinyOne/target}"
+# BENCH_BIN="$TARGET_DIR/release/tinylang-bench"
+TARGET_DIR="${CARGO_TARGET_DIR:-TinyOne/target}"
+BENCH_BIN="$TARGET_DIR/release/tinylang-bench"
 
 failures=()
 skips=()
@@ -132,8 +137,9 @@ else
   fi
 fi
 
-run_gate "Python tool tests" "CI_GATE_SKIP_PYTHON_TOOLS" \
-  python3 -m unittest discover -s tools -p 'test_*.py'
+run_gate "Python tool tests" "CI_GATE_SKIP_PYTHON_TOOLS"
+# python3 -m unittest discover -s tools -p 'test_*.py'
+uv run --no-project python -m unittest discover -s tools -p 'test_*.py'
 
 run_gate "ABI header drift" "CI_GATE_SKIP_ABI_DRIFT" \
   scripts/check_abi_drift.sh
@@ -143,9 +149,9 @@ if should_skip "CI_GATE_SKIP_HASH_LOC_SMOKE"; then
   skips+=("hash/loc smoke skipped by CI_GATE_SKIP_HASH_LOC_SMOKE")
 else
   run_gate "hash tree smoke" "CI_GATE_SKIP_HASH_LOC_SMOKE" \
-    python3 tools/hash.py --tree TinyOne --include .rs --format json
+    uv run --no-project python tools/hash.py --tree TinyOne --include .rs --format json
   run_gate "loc smoke" "CI_GATE_SKIP_HASH_LOC_SMOKE" \
-    python3 tools/loc.py --json
+    uv run --no-project python tools/loc.py --json
 fi
 
 release_built=0
@@ -170,7 +176,7 @@ if should_skip "CI_GATE_SKIP_BENCH_SMOKE"; then
   skips+=("bench smoke skipped by CI_GATE_SKIP_BENCH_SMOKE")
 elif [[ "$release_built" == "1" ]]; then
   run_gate "bench smoke" "CI_GATE_SKIP_BENCH_SMOKE" \
-    crates/tinyone_core/target/release/tinylang_bench --quick --repeats 1 --filter runtime.vm_straightline
+    "$BENCH_BIN" --quick --repeats 1 --filter runtime.vm_straightline
 else
   printf '\n==> SKIP bench smoke (release binary did not build)\n'
   skips+=("bench smoke skipped because release binary did not build")
