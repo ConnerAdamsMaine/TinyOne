@@ -4,8 +4,8 @@ TinyOne builds as a `cdylib` alongside the CLI binary. All public entry points
 are declared in `tinylang.h` at the repository root. This document covers how to
 embed TinyOne in a C or C++ application.
 
-**ABI STATUS: UNSTABLE.** Do not pin to a specific ABI version until v1 is
-tagged and the ABI is declared stable.
+**ABI STATUS: STABLE.** The TinyLang v1 release line implements C ABI version
+`1`. Consumers may pin to this version and reject incompatible libraries.
 
 ## Building the Library
 
@@ -48,6 +48,11 @@ Include the header:
 The committed generated C header for the current ABI is `tinylang.h`. It keeps
 exported symbols named `tinyone_*`; do not rename the C symbols as part of
 ordinary header work.
+
+`tinyone_abi_version()` returns the ABI version reported by the library, and
+`TINYONE_ABI_VERSION` is the matching header constant. Both report `1` for the
+stable v1 contract. Consumers should require the expected version before using
+the interface.
 
 Before changing `TinyOne/src/ffi.rs` or `tinylang.h`, run:
 
@@ -361,11 +366,11 @@ independently safe.
 
 ## Known Limitations
 
-- `tinyone_free_string` calls `CString::from_raw` without a `catch_unwind`
-  guard. Passing a double-freed pointer or a non-NUL-terminated pointer is
-  undefined behavior rather than a clean panic. Obey the ownership contract.
-- Future void-returning entry points cannot use the internal `respond()` helper.
-  Any new `void extern "C"` function added to the library must install its own
-  `catch_unwind` guard.
-- The ABI is UNSTABLE. JSON response schemas, function signatures, and the
-  header layout may change before v1.
+- `tinyone_free_string` is panic-contained, but passing a double-freed pointer
+  or a non-NUL-terminated pointer remains undefined behavior. Obey the
+  ownership contract.
+- All future `extern "C"` entry points must be panic-contained. Functions that
+  return JSON must use the internal `respond()` helper; void-returning
+  functions must use an equivalent `catch_unwind` guard before being exported.
+- ABI version `1` freezes the JSON response schemas, function signatures, and
+  header layout documented here. Breaking changes require a new ABI version.

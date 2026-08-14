@@ -4,6 +4,11 @@ This document specifies the exact JSON schema of the `"value"` object
 returned on success by each entry point. Error response shapes are
 documented in [`contract.md`](contract.md).
 
+The machine-readable contract is committed at
+[`tinyone-response-schema.json`](../../tinyone-response-schema.json). Consumers
+may validate complete responses against that schema; the Rust ABI tests also
+assert the exact response keys emitted by every current JSON entry point.
+
 Fields marked **UNSTABLE** may gain or lose keys before v1. Fields
 marked **STABLE** are frozen. See [`versioning.md`](versioning.md).
 

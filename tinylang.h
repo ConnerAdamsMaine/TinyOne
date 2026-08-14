@@ -15,9 +15,18 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#define TINYONE_ABI_VERSION 1u
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Return the ABI version implemented by this library.
+ *
+ * ABI version 1 is the stable contract for the TinyLang v1 release line.
+ */
+uint32_t tinyone_abi_version(void);
 
 /**
  * # Safety

@@ -12,18 +12,28 @@ use crate::{
     compile_file, compile_source, lex_source, run_program_report, run_source_report,
 };
 
+/// The stable C ABI version implemented by the v1 release line.
+pub const TINYONE_ABI_VERSION: u32 = 1;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tinyone_abi_version() -> u32 {
+    TINYONE_ABI_VERSION
+}
+
 /// # Safety
 ///
 /// `value` must be null or a pointer returned by a TinyOne C-ABI function
 /// that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tinyone_free_string(value: *mut c_char) {
-    if value.is_null() {
-        return;
-    }
-    unsafe {
-        drop(CString::from_raw(value));
-    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if value.is_null() {
+            return;
+        }
+        unsafe {
+            drop(CString::from_raw(value));
+        }
+    }));
 }
 
 /// # Safety

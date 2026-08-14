@@ -52,17 +52,7 @@ fn int(value: i64) -> RuntimeValue {
 }
 
 fn minimal_program(code: Vec<Instr>) -> Program {
-    Program {
-        code,
-        slot_count: 0,
-        names: Vec::new(),
-        functions: Vec::new(),
-        strings: Vec::new(),
-        structs: Vec::new(),
-        fields: Vec::new(),
-        modules: Vec::new(),
-        enum_variants: Vec::new(),
-    }
+    Program::new(code, 0)
 }
 
 struct TestDir {
@@ -109,7 +99,7 @@ fn straightline_vm_and_jit_alias_match() {
     let program = assert_backends_match(source, "24\n8\ntrue\nfalse\n");
     assert!(
         program
-            .code
+            .code()
             .iter()
             .all(|instr| !matches!(instr.op, Op::Jump | Op::JumpIfZero | Op::Call))
     );
@@ -157,7 +147,7 @@ fn loops_conditionals_and_loop_control_match() {
     let program = assert_backends_match(source, "25\n1\n");
     assert!(
         program
-            .code
+            .code()
             .iter()
             .any(|instr| matches!(instr.op, Op::Jump | Op::JumpIfZero))
     );
@@ -197,7 +187,7 @@ fn expression_statements_else_if_and_boolean_ops_match() {
     "#;
 
     let program = assert_backends_match(source, "7\n2\n1\n8\n9\n");
-    assert!(program.code.iter().any(|instr| instr.op == Op::Pop));
+    assert!(program.code().iter().any(|instr| instr.op == Op::Pop));
 }
 
 #[test]
@@ -237,9 +227,9 @@ fn low_level_ints_globals_and_unsafe_blocks_match() {
     let program = assert_backends_match(source, "u8\nu16\nu32\n255\n513\n42\n8\nu32\n");
     assert!(
         program
-            .functions
+            .functions()
             .iter()
-            .flat_map(|function| function.code.iter())
+            .flat_map(|function| function.code().iter())
             .any(|instr| instr.op == Op::LoadGlobal)
     );
 }
@@ -270,8 +260,8 @@ fn function_call_return_dispatch_matches() {
     "#;
 
     let program = assert_backends_match(source, "204\n");
-    assert_eq!(2, program.functions.len());
-    assert!(program.code.iter().any(|instr| instr.op == Op::Call));
+    assert_eq!(2, program.functions().len());
+    assert!(program.code().iter().any(|instr| instr.op == Op::Call));
 }
 
 #[test]
@@ -286,10 +276,10 @@ fn first_class_functions_closures_and_erased_generics_match() {
     print add_ten(7)
     "#;
     let program = assert_backends_match(source, "5\ngeneric\n17\n");
-    assert_eq!(program.functions[1].generic_params, vec!["T"]);
+    assert_eq!(program.functions()[1].generic_params(), vec!["T"]);
     let artifact = program.to_artifact();
     let restored = tinyone::Program::from_artifact(artifact).expect("generic artifact");
-    assert_eq!(restored.functions[1].generic_params, vec!["T"]);
+    assert_eq!(restored.functions()[1].generic_params(), vec!["T"]);
 }
 
 #[test]
@@ -367,10 +357,10 @@ fn jit_cache_reuses_straightline_dispatch_and_heap_programs() {
         let mut cache = JitCache::new();
 
         assert!(cache.is_empty(), "{name}");
-        let first = cache.compile(&*program).expect("jit compile") as *const _;
+        let first = cache.compile(&program).expect("jit compile") as *const _;
         assert_eq!(1, cache.len(), "{name}");
 
-        let second = cache.compile(&*program).expect("jit compile") as *const _;
+        let second = cache.compile(&program).expect("jit compile") as *const _;
         assert_eq!(first, second, "{name}");
         assert_eq!(1, cache.len(), "{name}");
     }
@@ -386,7 +376,7 @@ fn jit_compiles_to_lowered_bytecode_listing() {
     )
     .expect("source should compile");
     let mut cache = JitCache::new();
-    let compiled = cache.compile(&*program).expect("jit compile");
+    let compiled = cache.compile(&program).expect("jit compile");
 
     assert_eq!(program.fingerprint(), compiled.fingerprint());
     assert!(compiled.listing().contains(".chunk 0 main"));
@@ -403,7 +393,7 @@ fn write_jit_listing_emits_inspectable_file() {
     let temp = TestDir::new("jit-listing");
     let path = temp.path().join("program.tjit");
 
-    write_jit_listing(&*program, &path).expect("write jit listing");
+    write_jit_listing(&program, &path).expect("write jit listing");
     let listing = fs::read_to_string(path).expect("read jit listing");
 
     assert!(listing.contains("tinyone adaptive-jit"));
@@ -430,7 +420,7 @@ fn jit_quickens_hot_back_edges_after_warm_runs() {
     for _ in 0..2 {
         let mut stdout = Vec::new();
         cache
-            .run_program(&*program, &mut stdout, Vec::new())
+            .run_program(&program, &mut stdout, Vec::new())
             .expect("jit should run");
         assert_eq!("2016\n", String::from_utf8(stdout).expect("UTF-8 output"));
     }
@@ -440,7 +430,7 @@ fn jit_quickens_hot_back_edges_after_warm_runs() {
     assert!(stats.hot_ranges >= 1);
     assert!(stats.quickened_ops > 0);
 
-    let listing = cache.compile(&*program).expect("jit compile").listing();
+    let listing = cache.compile(&program).expect("jit compile").listing();
     assert!(listing.contains("add.int"));
     assert!(listing.contains("jmp.hot"));
 }
@@ -881,15 +871,15 @@ fn imports_and_artifact_roundtrip() {
     .expect("write main");
 
     let program = compile_file(&main_path).expect("compile file");
-    assert_eq!(1, program.modules.len());
-    assert_eq!("pairs", program.modules[0].path);
+    assert_eq!(1, program.modules().len());
+    assert_eq!("pairs", program.modules()[0].path());
     assert_eq!(
         vec!["sum_pair".to_string()],
-        program.modules[0].exported_functions
+        program.modules()[0].exported_functions()
     );
     assert_eq!(
         vec!["Pair".to_string()],
-        program.modules[0].exported_structs
+        program.modules()[0].exported_structs()
     );
     assert!(
         !program
@@ -900,7 +890,7 @@ fn imports_and_artifact_roundtrip() {
     );
 
     let artifact_path = temp.path().join("main.tobc.json");
-    write_artifact(&*program, &artifact_path).expect("write artifact");
+    write_artifact(&program, &artifact_path).expect("write artifact");
     let loaded = Arc::new(load_artifact(&artifact_path).expect("load artifact"));
     assert_eq!(program.fingerprint(), loaded.fingerprint());
 
@@ -1065,46 +1055,45 @@ fn verifier_rejects_invalid_jump_target() {
 
 #[test]
 fn verifier_rejects_call_arity_mismatch() {
-    let function = Function {
-        name: "id".to_string(),
-        generic_params: Vec::new(),
-        param_count: 1,
-        code: vec![Instr::new(Op::Load, 0, 0), Instr::new(Op::Return, 0, 0)],
-        slot_count: 1,
-        names: vec!["value".to_string()],
-    };
-    let mut program = minimal_program(vec![
+    let function = Function::new(
+        "id",
+        1,
+        vec![Instr::new(Op::Load, 0, 0), Instr::new(Op::Return, 0, 0)],
+        1,
+    );
+    let program = minimal_program(vec![
         Instr::new(Op::PushInt, 7, 0),
         Instr::new(Op::Call, 0, 0),
         Instr::new(Op::Print, 0, 0),
         Instr::new(Op::Halt, 0, 0),
     ]);
-    program.functions.push(function);
+    let program = program.with_functions(vec![function]);
 
     assert_error_contains(BytecodeVerifier::verify(&program), "expects 1 argument");
 }
 
 #[test]
 fn verifier_rejects_invalid_slot_and_struct_arity() {
-    let mut invalid_slot = minimal_program(vec![
+    let invalid_slot = minimal_program(vec![
         Instr::new(Op::Load, 2, 0),
         Instr::new(Op::Print, 0, 0),
         Instr::new(Op::Halt, 0, 0),
     ]);
-    invalid_slot.slot_count = 1;
-    invalid_slot.names.push("only".to_string());
+    let invalid_slot = invalid_slot
+        .with_slot_count(1)
+        .with_names(vec!["only".to_string()]);
     assert_error_contains(BytecodeVerifier::verify(&invalid_slot), "invalid slot 2");
 
-    let mut invalid_struct = minimal_program(vec![
+    let invalid_struct = minimal_program(vec![
         Instr::new(Op::PushInt, 1, 0),
         Instr::new(Op::MakeStruct, 0, 1),
         Instr::new(Op::Print, 0, 0),
         Instr::new(Op::Halt, 0, 0),
     ]);
-    invalid_struct.structs.push(StructDef {
-        name: "Pair".to_string(),
-        fields: vec!["left".to_string(), "right".to_string()],
-    });
+    let invalid_struct = invalid_struct.with_structs(vec![StructDef::new(
+        "Pair",
+        vec!["left".to_string(), "right".to_string()],
+    )]);
     assert_error_contains(
         BytecodeVerifier::verify(&invalid_struct),
         "expects 2 field value",

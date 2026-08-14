@@ -18,3 +18,13 @@ Thumbs.db
 
 # Local-only docs
 docs/superpowers/*
+
+# Local-only development/preparation
+git-prep/*
+
+# Local compiler output
+/main.s
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]

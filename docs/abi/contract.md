@@ -1,11 +1,10 @@
 # TinyOne ABI Contract
 
-These invariants hold for all current entry points. They are not subject
-to the ABI stability question — they describe observable behavior that
-TinyOne guarantees today and will preserve across versions.
+These invariants hold for all ABI version 1 entry points. They describe
+observable behavior that TinyOne guarantees for the v1 release line.
 
-See [`versioning.md`](versioning.md) for what changes before v1 and
-what freezes after. See [`schemas.md`](schemas.md) for the exact JSON
+See [`versioning.md`](versioning.md) for the compatibility policy and
+[`schemas.md`](schemas.md) for the exact JSON
 field contracts per endpoint.
 
 ## Panic Boundary

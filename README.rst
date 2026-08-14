@@ -14,7 +14,7 @@ optimizer, verifier, portable VM, heap/runtime model, bytecode artifact
 support, adaptive execution support, host integration surfaces, CLI tooling,
 and early allocator-integration scaffolding.
 
-Current crate version: ``0.6.0`` (the implementation is now managed as the
+Current crate version: ``1.2.0`` (the implementation is now managed as the
 public v1 release line while language work proceeds internally under v2).
 
 The current Rust crate lives in ``TinyOne/`` in this checkout. TinyLang is the
@@ -243,8 +243,8 @@ The FFI surface uses JSON-over-C-string entry points:
 * ``tinyone_jit_listing_json``
 * ``tinyone_free_string``
 
-Returned strings must be released with ``tinyone_free_string``. The ABI is
-explicitly unstable before v1.
+Returned strings must be released with ``tinyone_free_string``. The v1 C ABI
+is stable and reports ABI version ``1`` through ``tinyone_abi_version``.
 
 Documentation
 -------------
@@ -330,27 +330,12 @@ Repository and documentation drift
 Test and verification gaps
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* ``cargo test --manifest-path TinyOne/Cargo.toml`` currently fails in
-  ``stdlib_modules_compile_via_manifest_import`` because ``stdlib/tinyone.json``
-  is missing.
-* ``cargo test --manifest-path TinyOne/Cargo.toml --features testing-hooks``
-  currently has testing-hook type drift: the test facade derives ``Eq`` for a
-  structure containing ``Vec<RuntimeValue>`` while ``RuntimeValue`` is only
-  ``PartialEq``, and the facade still has ``Program``/``Arc<Program>`` mismatch
-  points.
-* The default crate build currently emits warnings for unused imports,
-  variables, fields, methods, and staged heap variants.
 * The C FFI smoke test depends on a built debug ``cdylib`` and may skip when
   that library is not present.
 
 Language and runtime gaps
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-* Enum syntax appears in fixtures, but the live lexer/parser do not implement
-  ``enum`` syntax yet.
-* Type annotations, float literals, and boolean literal syntax appear in newer
-  fixture names, but the current lexer/parser do not implement ``:``, ``->``,
-  floats, or ``true``/``false`` language syntax as first-class tokens.
 * The runtime type registry contains internal/staged variants beyond the
   source-level types. Heap ``type_of`` mappings are wired for all current
   ``HeapData`` variants; resolving a bare ``HeapRef`` still requires heap
@@ -393,10 +378,8 @@ Useful commands::
 Current state:
 
 * ``cargo check --manifest-path TinyOne/Cargo.toml`` passes, but with warnings.
-* The default test suite is not clean because of the missing root stdlib
-  manifest.
-* The feature-gated language fixture suite needs testing-hook repairs before it
-  can be treated as a clean verification gate.
+* The default test suite and feature-gated language fixture suite are release
+  gates and are expected to pass before changes are pushed.
 
 Repository Layout
 -----------------
@@ -405,7 +388,6 @@ Repository Layout
 
     .
     |-- README.rst
-    |-- LICENSE.md
     |-- tinylang.h
     |-- TinyOne/
     |   |-- Cargo.toml
@@ -456,8 +438,3 @@ themes include:
 * explicit numeric semantics
 * deterministic ownership and allocator integration
 * documentation cleanup after the crate path move
-
-License
--------
-
-See ``LICENSE.md``.

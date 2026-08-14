@@ -1,9 +1,7 @@
 # ABI Versioning and Stability
 
-**Current ABI status: UNSTABLE.** Do not pin to a specific ABI version
-until v1 is tagged and stability is declared. See the
-[v1 roadmap](../v1-roadmap.md) for the work required before that
-declaration.
+**Current ABI status: STABLE (version 1).** Callers should compare
+`tinyone_abi_version()` with `TINYONE_ABI_VERSION` before using the interface.
 
 ## What Constitutes a Breaking Change
 
@@ -28,9 +26,7 @@ The following changes break binary or source compatibility for callers:
 
 ## What Is Not a Breaking Change
 
-- Adding new keys to a success `value` object (callers should ignore
-  unknown keys)
-- Adding new entry points to `tinyone.h`
+- Adding new entry points to `tinylang.h`
 - Adding new opcode ordinals above the frozen Phase-1 range
 - Adding new Phase-2 builtin slots above index 34
 - Changing internal implementation details with no observable effect on
@@ -42,29 +38,28 @@ The following changes break binary or source compatibility for callers:
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Function signatures in `tinyone.h` | UNSTABLE | May change before v1 |
+| Function signatures in `tinylang.h` | STABLE | Frozen for ABI version 1 |
 | Response envelope shape (4 kinds) | STABLE | Frozen now |
-| `value` object keys per endpoint | UNSTABLE | Audit pending (roadmap item 1) |
-| `memory` array encoding | UNSTABLE | Encoding not yet frozen |
+| `value` object keys per endpoint | STABLE | Frozen by `tinyone-response-schema.json` |
+| `memory` array encoding | STABLE | Frozen by `tinyone-response-schema.json` |
 | Phase-1 opcode ordinals (1–29) | STABLE | Frozen; artifact round-trips depend on them |
-| Phase-2 opcode ordinals (30+) | UNSTABLE | May change before v1 |
+| Phase-2 opcode ordinals (30+) | STABLE | Frozen for the v1 artifact format |
 | Phase-1 builtin slots (0–34) | STABLE | Frozen |
-| Phase-2 builtin slots (35+) | UNSTABLE | Order may change before v1 |
+| Phase-2 builtin slots (35+) | STABLE | Frozen for the v1 release line |
 | Artifact `format`/`version` fields | STABLE | `"tinyone-bytecode"` / `1` |
 
 ## v1 Stability Declaration
 
-When v1 is tagged, the following will be declared stable and will not
-change without a major version bump:
+The following surfaces are stable and will not change without a major version
+bump or, for the C boundary, a new ABI version:
 
-1. All function signatures in `tinyone.h`
+1. All function signatures in `tinylang.h`
 2. All four response envelope shapes
 3. All `value` object keys for every entry point
 4. The `memory` array encoding
 5. Phase-1 opcode ordinals, Phase-2 opcode ordinals, and Phase-2 builtin slot order
 
-Before v1 can be declared, the [v1 roadmap](../v1-roadmap.md) items 1–5
-(ABI blocking) must be resolved. Key items:
+The [v1 roadmap](../v1-roadmap.md) items 1–5 were resolved by:
 
 - **Item 1:** JSON response schema audit and contract tests committed
 - **Item 2:** `Program` field visibility scoped to `pub(crate)`
@@ -74,7 +69,7 @@ Before v1 can be declared, the [v1 roadmap](../v1-roadmap.md) items 1–5
 
 ## Decay Policy
 
-After v1 is declared, deprecated features will be marked in `tinyone.h`
+After v1 is declared, deprecated features will be marked in `tinylang.h`
 with a `// DEPRECATED(vX.Y): reason` comment and kept for at least one
 minor version cycle before removal. Removals require a major version
 bump.
