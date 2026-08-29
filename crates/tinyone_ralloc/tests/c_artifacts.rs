@@ -19,7 +19,16 @@ fn release_build_emits_c_linkable_library_artifacts() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let release_dir = Path::new(manifest_dir).join("target/release");
+    // With a workspace, `cargo build` from a crate dir outputs to the workspace
+    // `target/release` (repo root), not `crates/tinyone_ralloc/target/release`.
+    // Check both locations; prefer crate-local if present for non-workspace builds.
+    let crate_release = Path::new(manifest_dir).join("target/release");
+    let workspace_release = Path::new(manifest_dir).join("../../target/release");
+    let release_dir = if crate_release.join(if cfg!(windows) { "ralloc.lib" } else { "libralloc.a" }).is_file() {
+        crate_release
+    } else {
+        workspace_release
+    };
     let static_library = if cfg!(windows) { "ralloc.lib" } else { "libralloc.a" };
     let shared_library = if cfg!(windows) {
         "ralloc.dll"
