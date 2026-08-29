@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import re
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -204,7 +205,13 @@ def command_generate_header(args: argparse.Namespace) -> int:
         print(f"cbindgen config does not exist: {rel(config)}", file=sys.stderr)
         return 2
 
-    cbindgen = shutil.which(args.cbindgen)
+    # Allow direct path (e.g., fake-cbindgen.py in tests) without requiring PATH lookup;
+    # on Windows, `shutil.which` may not resolve `.py` files.
+    cbindgen_path = pathlib.Path(args.cbindgen)
+    if cbindgen_path.exists():
+        cbindgen = str(cbindgen_path)
+    else:
+        cbindgen = shutil.which(args.cbindgen)
     if cbindgen is None:
         print(
             "cbindgen is not available on PATH; cannot generate tinylang.h.",
@@ -218,13 +225,26 @@ def command_generate_header(args: argparse.Namespace) -> int:
         return 2
 
     output = args.output
-    command = [
-        cbindgen,
-        "--lang",
-        "c",
-        "--output",
-        str(output),
-    ]
+    # On Windows, a Python fake-cbindgen (`.py`) cannot be executed directly
+    # via subprocess without a `python` launcher; handle `.py` cbindgen paths
+    # by prepending the current Python executable.
+    if str(cbindgen).endswith(".py"):
+        command = [
+            str(pathlib.Path(sys.executable)),
+            cbindgen,
+            "--lang",
+            "c",
+            "--output",
+            str(output),
+        ]
+    else:
+        command = [
+            cbindgen,
+            "--lang",
+            "c",
+            "--output",
+            str(output),
+        ]
     if config is not None:
         command.extend(["--config", str(config)])
     command.append(str(source))
