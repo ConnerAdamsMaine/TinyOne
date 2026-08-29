@@ -34,6 +34,7 @@ fn box_mutation_requires_unique_handle() {
     assert_eq!(*value, 42);
 }
 
+// BUG: Intermittent failures (stable-x86_64-unknown-linux-gnu)
 #[test]
 fn box_into_inner_moves_value_out_and_frees_storage() {
     DROP_COUNT.store(0, Ordering::SeqCst);

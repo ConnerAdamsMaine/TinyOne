@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOL = ROOT / "Tools" / "abi_manifest.py"
+TOOL = ROOT / "tools" / "abi_manifest.py"
 
 
 class AbiManifestToolTests(unittest.TestCase):
