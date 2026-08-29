@@ -203,11 +203,22 @@ fn realloc_copy_guard_snapshot_for_tests(ptr: *mut c_void) -> ReallocCopyGuardSn
 
     let owner = record.owner();
     let allocation_size = if owner.index() < ARENA_COUNT {
-        let mut state = ARENAS[owner.index()].lock();
-        state
-            .arena
-            .as_mut()
-            .and_then(|arena| arena.allocation_size(ptr.cast::<u8>()).ok())
+        ARENAS
+            .get(owner.index())
+            .and_then(|arena| arena.try_lock())
+            .and_then(|mut state| {
+                state
+                    .arena
+                    .as_mut()
+                    .and_then(|arena| arena.allocation_size(ptr.cast::<u8>()).ok())
+            })
+            .or_else(|| {
+                let mut state = ARENAS[owner.index()].lock();
+                state
+                    .arena
+                    .as_mut()
+                    .and_then(|arena| arena.allocation_size(ptr.cast::<u8>()).ok())
+            })
     } else {
         None
     };
