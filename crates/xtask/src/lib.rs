@@ -219,11 +219,7 @@ fn test_step() -> Step {
         [
             cargo(&["test", "--manifest-path", "crates/xtask/Cargo.toml"]),
             cargo(&["test", "--manifest-path", "crates/tinyone_core/Cargo.toml"]),
-            cargo(&[
-                "test",
-                "--manifest-path",
-                "crates/tinyone_ralloc/Cargo.toml",
-            ]),
+            cargo(&["test", "--manifest-path", "crates/tinyone_ralloc/Cargo.toml"]),
         ],
     )
 }
