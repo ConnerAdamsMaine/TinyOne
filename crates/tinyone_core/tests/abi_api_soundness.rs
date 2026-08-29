@@ -26,6 +26,7 @@ use tinyone::{
     run_source,
     write_jit_listing,
 };
+use tinyone_test_support::expect_error_contains;
 
 const MAX_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ARTIFACT_FUNCTIONS: usize = 4_096;
@@ -226,14 +227,6 @@ fn assert_ffi_error(response: JsonValue, kind: &str, needle: &str) {
         .and_then(JsonValue::as_str)
         .expect("error response must include message");
     assert!(error.contains(needle), "expected FFI error to contain {needle:?}, got {error:?}");
-}
-
-fn expect_error_contains<T>(result: tinyone::Result<T>, needle: &str) {
-    let error = match result {
-        Ok(_) => panic!("operation should fail"),
-        Err(error) => error.to_string(),
-    };
-    assert!(error.contains(needle), "expected error to contain {needle:?}, got {error:?}");
 }
 
 fn minimal_program() -> Program {
