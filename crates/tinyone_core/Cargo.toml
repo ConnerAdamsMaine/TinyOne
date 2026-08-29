@@ -11,6 +11,10 @@ exclude      = [ "main.rs" ]
 [features]
 default       = [  ]
 testing-hooks = [ "ralloc/testing-hooks" ]
+# Reserved recovery gate for the Authority-backed registry/signing WIP. Its
+# implementation has an additional always-false cfg so it remains inert even
+# under `--all-features` until the Authority crates are intentionally restored.
+authority-registry-wip = [  ]
 
 [lib]
 name       = "tinyone"
@@ -22,7 +26,7 @@ path = "src/main.rs"
 
 ## TODO(@mrdwarf7): [refactor] Move this to a separate crate for benchmarking and testing.
 [[bin]]
-name = "tinylang_bench"
+name = "tinylang-bench"
 path = "src/bin/tinylang_bench.rs"
 
 ## TODO(@mrdwarf7): [refactor] Move this to a separate crate for benchmarking and testing.

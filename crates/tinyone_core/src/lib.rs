@@ -26,6 +26,8 @@
 pub mod alloc_table;
 mod api;
 mod artifact_io;
+#[cfg(all(feature = "authority-registry-wip", any()))]
+mod authority_registry_wip;
 mod builtins;
 mod bytecode;
 mod compile_cache;
