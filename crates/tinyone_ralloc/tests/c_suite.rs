@@ -1,12 +1,8 @@
 use std::process::Command;
 
 #[test]
+#[cfg(not(windows))]
 fn c_allocator_suite_passes_against_static_library() {
-    if cfg!(windows) {
-        eprintln!("skipping POSIX C allocator suite on Windows");
-        return;
-    }
-
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let runner = format!("{manifest_dir}/tests/c/run_c_suite.sh");
 

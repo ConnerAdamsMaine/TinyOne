@@ -180,7 +180,7 @@ static int test_large_allocations_spill_to_additional_arenas(void) {
 }
 
 static int test_out_of_memory_reports_null_then_recovers_after_free(void) {
-    enum { MAX_ALLOCS = 128 };
+    enum { MAX_ALLOCS = 8192 };
     void *allocations[MAX_ALLOCS];
     size_t count = 0;
 

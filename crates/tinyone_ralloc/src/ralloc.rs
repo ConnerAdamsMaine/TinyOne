@@ -240,6 +240,7 @@ fn realloc_copy_guard_snapshot_for_tests(ptr: *mut c_void) -> ReallocCopyGuardSn
 /// Any returned non-null pointer must be used according to the C allocator
 /// contract: it may be passed back to Ralloc's `free` or `realloc` functions
 /// exactly as documented by those functions.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ralloc_malloc(size: usize) -> *mut c_void {
     allocate(size)
 }
@@ -254,6 +255,7 @@ pub unsafe extern "C" fn ralloc_malloc(size: usize) -> *mut c_void {
 ///
 /// Any returned non-null pointer must be used according to the C allocator
 /// contract: it may be passed back to Ralloc's `free` function exactly once.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ralloc_aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
     allocate_aligned(size, alignment)
 }
@@ -267,6 +269,7 @@ pub unsafe extern "C" fn ralloc_aligned_alloc(alignment: usize, size: usize) -> 
 ///
 /// `ptr` must either be null or a live pointer returned by `ralloc_malloc`,
 /// `ralloc_calloc`, or `ralloc_realloc` that has not already been freed.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ralloc_free(ptr: *mut c_void) {
     deallocate(ptr);
 }
@@ -280,6 +283,7 @@ pub unsafe extern "C" fn ralloc_free(ptr: *mut c_void) {
 ///
 /// Any returned non-null pointer must be used according to the same ownership
 /// contract as `ralloc_malloc`.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ralloc_calloc(nmemb: usize, size: usize) -> *mut c_void {
     let Some(total) = nmemb.checked_mul(size) else {
         return ptr::null_mut();
@@ -305,6 +309,7 @@ pub unsafe extern "C" fn ralloc_calloc(nmemb: usize, size: usize) -> *mut c_void
 /// `ptr` must either be null or a live pointer returned by Ralloc that has not
 /// already been freed. If this function returns null, the original allocation
 /// remains owned by the caller unless `size` is zero.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ralloc_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     reallocate(ptr, size)
 }
