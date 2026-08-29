@@ -33,7 +33,15 @@ args = ["test", "--workspace"]
 [tasks.ci-test-hooks]
 description = "CI: language suite with testing-hooks"
 command = "cargo"
-args = ["test", "-p", "tinylang", "--features", "testing-hooks", "--test", "language_suite"]
+args = [
+  "test",
+  "-p",
+  "tinylang",
+  "--features",
+  "testing-hooks",
+  "--test",
+  "language_suite",
+]
 
 # ---------------------------------------------------------------------------
 # Python tooling - pinned to PYTHON_VERSION, fail hard, no || fallback
@@ -42,12 +50,33 @@ args = ["test", "-p", "tinylang", "--features", "testing-hooks", "--test", "lang
 [tasks.ci-python-tools]
 description = "CI: python tool unit tests via uv (pinned python 3.12)"
 command = "uv"
-args = ["run", "--no-project", "--python", "${PYTHON_VERSION}", "python", "-m", "unittest", "discover", "-s", "${TOOL_DIR}", "-p", "test_*.py"]
+args = [
+  "run",
+  "--no-project",
+  "--python",
+  "${PYTHON_VERSION}",
+  "python",
+  "-m",
+  "unittest",
+  "discover",
+  "-s",
+  "${TOOL_DIR}",
+  "-p",
+  "test_*.py",
+]
 
 [tasks.ci-abi-drift]
 description = "CI: ABI drift check (hard fail, no fallback)"
 command = "uv"
-args = ["run", "--no-project", "--python", "${PYTHON_VERSION}", "python", "${TOOL_DIR}/abi_manifest.py", "check"]
+args = [
+  "run",
+  "--no-project",
+  "--python",
+  "${PYTHON_VERSION}",
+  "python",
+  "${TOOL_DIR}/abi_manifest.py",
+  "check",
+]
 
 # ---------------------------------------------------------------------------
 # Aggregators - short aliases remain in Makefile.toml, these are the impls
@@ -59,7 +88,15 @@ dependencies = ["ci-fmt-check", "ci-clippy"]
 
 [tasks.ci-gate]
 description = "Full CI gate (lint + check + test + python + abi). No script wrapper."
-dependencies = ["ci-fmt-check", "ci-check", "ci-clippy", "ci-test", "ci-test-hooks", "ci-python-tools", "ci-abi-drift"]
+dependencies = [
+  "ci-fmt-check",
+  "ci-check",
+  "ci-clippy",
+  "ci-test",
+  "ci-test-hooks",
+  "ci-python-tools",
+  "ci-abi-drift",
+]
 
 [tasks.ci-gate-fast]
 description = "Fast local gate: check + test only"

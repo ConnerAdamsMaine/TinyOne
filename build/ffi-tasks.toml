@@ -24,7 +24,11 @@ args = ["${SCRIPT_DIR}/consumer_compile.sh", "rust"]
 
 [tasks.ffi-consumer-compile]
 description = "Compile all consumer fixtures (c + cpp + rust)"
-dependencies = ["ffi-consumer-compile-c", "ffi-consumer-compile-cpp", "ffi-consumer-compile-rust"]
+dependencies = [
+  "ffi-consumer-compile-c",
+  "ffi-consumer-compile-cpp",
+  "ffi-consumer-compile-rust",
+]
 
 [tasks.ffi-consumer-smoke]
 description = "Compile + run C smoke consumer (real work in scripts/consumer_smoke.sh)"
