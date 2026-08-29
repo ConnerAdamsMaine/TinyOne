@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use core::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

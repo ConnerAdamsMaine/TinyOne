@@ -1,6 +1,5 @@
-include = [ "**/*.toml" ]
-#exclude = []
-
+include  = ["**/*.toml"]
+exclude  = [".rustfmt.toml"]
 [schema]
 path    = "taplo://taplo.toml"
 enabled = true
