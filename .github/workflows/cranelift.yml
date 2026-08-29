@@ -1,0 +1,55 @@
+name: "Cranelift"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - ".github/workflows/cranelift.yml"
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: "always"
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  cranelift:
+    name: "Cranelift - ${{ matrix.target }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: "ubuntu-latest"
+            target: "x86_64-unknown-linux-gnu"
+          - os: "windows-latest"
+            target: "x86_64-pc-windows-msvc"
+    runs-on: "${{ matrix.os }}"
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Setup Rust (with cranelift codegen)"
+        uses: "./.github/actions/setup-rust"
+        with:
+          target: "${{ matrix.target }}"
+          # rust-toolchain.toml already enables rustc-codegen-cranelift
+
+      - name: "Build with cranelift backend"
+        shell: "bash"
+        run: cargo build --workspace
+
+      - name: "Test with cranelift backend"
+        shell: "bash"
+        run: cargo test --workspace
+
+      - name: "Rust codegen cranelift available"
+        shell: "bash"
+        run: rustc --print codegen-backends | grep -i cranelift || (echo "cranelift backend not available" && exit 1)

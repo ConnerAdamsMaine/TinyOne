@@ -1,5 +1,7 @@
 extend = [
   { path = "./build/common-tasks.toml" },
+  { path = "./build/ci-tasks.toml" },
+  { path = "./build/ffi-tasks.toml" },
   { path = "./build/dist-tasks.toml" },
   { path = "./build/docker-tasks.toml", optional = true },
   { path = "./build/watch-tasks.toml", optional = true },
@@ -7,24 +9,30 @@ extend = [
   { path = "./build/release-tasks.toml", optional = true },
 ]
 
+[env]
+ROOT = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}"
+SCRIPT_DIR = "${ROOT}/scripts"
+TOOL_DIR = "${ROOT}/tools"
+
 # Name of output if/when calling dist tasks, should match the cargo bin output
-env.PROJECT_NAME = "tinylang" # "cargo_output_binary_name_for_PROJECT_NAME"
+PROJECT_NAME = "tinylang" # "cargo_output_binary_name_for_PROJECT_NAME"
 # Default profile to use for builds during dist related tasks
-env.SLEEP_TIME = "15"
+SLEEP_TIME = "15"
 
 # GitHub / repo metadata (set by setup.sh during template init)
-env.GITHUB_USER = "ConnerAdamsMaine"
-env.REPO_NAME = "TinyOne"
+GITHUB_USER = "ConnerAdamsMaine"
+REPO_NAME = "TinyOne"
 ## TODO: May need to have a section that checks if fork or not
-env.GITHUB_URL = "https://github.com/ConnerAdamsMaine/TinyOne/"
+GITHUB_URL = "https://github.com/ConnerAdamsMaine/TinyOne/"
 
 # Changelog tool configuration
-env.CHANGELOG_TOOL = "git-cliff"
-env.CHANGELOG_ARGS_BASE = "--repository ${GITHUB_URL} --commit-path . --sort newest --strip all --with-commit"
+CHANGELOG_TOOL = "git-cliff"
+CHANGELOG_ARGS_BASE = "--repository ${GITHUB_URL} --commit-path . --sort newest --strip all --with-commit"
 
 # Identifies the first argument passed after `cargo` as, or inplace of `build`.
 # ie: `cargo build <...zyx...>` vs. `cargo zigbuild <...xyz...>`
-env.BUILD_ARG = "build"
+BUILD_ARG = "build"
+# BUILD_ARG = "zigbuild"
 # env.BUILD_ARG = "zigbuild"
 
 ## START Full sweeps/aliases
