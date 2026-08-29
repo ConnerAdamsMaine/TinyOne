@@ -23,8 +23,13 @@ runs:
       if: "${{ runner.os == 'Windows' }}"
       shell: "bash"
       run: |
-        # Windows PATH is semicolon-delimited; filter case-insensitively.
-        # Do NOT split on ':' - that breaks drive letters like C:\.
-        filtered="$(printf '%s' "$PATH" | tr ';' '\n' | { grep -iv 'Git.*usr.bin' || true; } | paste -sd ';' -)"
+        # Git for Windows ships C:\Program Files\Git\usr\bin\link.exe (MSYS)
+        # which shadows MSVC's link.exe on PATH and breaks cl.exe linking.
+        # bash on Windows sees PATH as colon-separated (/c/...:/usr/bin...),
+        # while GITHUB_ENV expects semicolon-separated. Detect delimiter.
+        if printf '%s' "$PATH" | grep -q ';'; then delim=';'; else delim=':'; fi
+        filtered="$(printf '%s' "$PATH" | tr "$delim" '\n' | { grep -iv 'Git.*usr.bin' || true; } | paste -sd "$delim" -)"
+        # Fallback: if filtering somehow emptied PATH, keep original
+        if [ -z "$filtered" ]; then filtered="$PATH"; fi
         echo "PATH=$filtered" >> "$GITHUB_ENV"
-        printf "Filtered Git usr/bin from PATH (entries: %s -> %s)\n" "$(printf '%s' "$PATH" | tr ';' '\n' | wc -l)" "$(printf '%s' "$filtered" | tr ';' '\n' | wc -l)"
+        printf "Filtered Git usr/bin from PATH (entries: %s -> %s, delim='%s')\n" "$(printf '%s' "$PATH" | tr "$delim" '\n' | wc -l)" "$(printf '%s' "$filtered" | tr "$delim" '\n' | wc -l)" "$delim"
