@@ -66,8 +66,7 @@ impl VmAllocator {
 
     /// Allocates `len` bytes with at least `align` byte alignment.
     pub fn allocate_aligned(&self, len: usize, align: usize) -> Result<VmAllocation, RallocError> {
-        RallocBuffer::try_new_aligned(len, align)
-            .map(|buffer| VmAllocation(ManuallyDrop::new(buffer)))
+        RallocBuffer::try_new_aligned(len, align).map(|buffer| VmAllocation(ManuallyDrop::new(buffer)))
     }
 
     /// Releases a `VmAllocation`, consuming it by value.
@@ -87,11 +86,7 @@ impl VmAllocator {
     /// On failure, returns the original `alloc` unchanged alongside the
     /// error — matching `realloc(3)` semantics — so the caller never loses
     /// track of a live allocation.
-    pub fn reallocate(
-        &self,
-        alloc: VmAllocation,
-        new_len: usize,
-    ) -> Result<VmAllocation, (VmAllocation, RallocError)> {
+    pub fn reallocate(&self, alloc: VmAllocation, new_len: usize) -> Result<VmAllocation, (VmAllocation, RallocError)> {
         let VmAllocation(buffer) = alloc;
         let mut buffer = ManuallyDrop::into_inner(buffer);
         match buffer.try_resize(new_len) {
@@ -167,10 +162,7 @@ mod tests {
     fn allocate_past_capacity_returns_err_not_panic() {
         let vm = VmAllocator::global();
         let result = vm.allocate(VmAllocator::capacity() * 2);
-        assert!(
-            result.is_err(),
-            "oversized allocation must error, not panic"
-        );
+        assert!(result.is_err(), "oversized allocation must error, not panic");
     }
 
     #[test]

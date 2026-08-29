@@ -15,18 +15,23 @@ mod arena;
 mod backend;
 mod block;
 mod buffer;
+#[cfg(any(test, feature = "testing-hooks"))]
+mod instrumentation;
 mod page;
 mod ralloc;
 mod region;
 mod sync;
+mod vm;
+
+pub use buffer::{RallocBox, RallocBuffer, RallocError};
+pub use ralloc::{ralloc_aligned_alloc, ralloc_calloc, ralloc_free, ralloc_malloc, ralloc_realloc};
+pub use vm::{VmAllocation, VmAllocator};
+#[cfg(feature = "testing-hooks")]
+pub mod testing;
 
 // Panic handler for no_std builds (cdylib, i.e. when rlib is NOT active)
 #[cfg(not(feature = "rlib"))]
 use core::panic::PanicInfo;
-
-pub use buffer::{RallocBox, RallocBuffer, RallocError};
-// Re-export C ABI functions for Rust consumers
-pub use ralloc::{ralloc_aligned_alloc, ralloc_calloc, ralloc_free, ralloc_malloc, ralloc_realloc};
 
 #[cfg(not(feature = "rlib"))]
 #[panic_handler]

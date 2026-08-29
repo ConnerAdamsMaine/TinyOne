@@ -9,8 +9,27 @@ use crate::backend::{FixedRegionBackend, MemoryBackend, RegionRequest};
 use crate::region::{self, ArenaSlot};
 use crate::sync::SpinLock;
 
-const ARENA_COUNT: usize = 4;
-const ARENA_BYTES: usize = 64 * 1024;
+pub(crate) const ARENA_COUNT: usize = 4;
+// 4 * 8 MiB = 32 MiB total static pool.
+//
+// TinyOne's containers (Array/Map/Vec/Dictionary/Closure captures) now own
+// their real backing bytes directly (RallocVec, growing via amortized
+// doubling) rather than just shadow-tracking a Rust-native Vec. Sizing must
+// cover the worst case, not just TinyOne's MAX_HEAP_BYTES (4 MiB, see
+// TinyOne/src/runtime/limits.rs) logical budget directly:
+//   - A single object can reach the *entire* 4 MiB logical budget (e.g. one
+//     array at MAX_ARRAY_LENGTH). Amortized doubling means its physical
+//     capacity can be up to 2x that (8 MiB) once grown.
+//   - `max_allocation_size()` is one arena's size — a single allocation
+//     cannot span arenas — so one arena must alone be >= that 8 MiB worst
+//     case; hence ARENA_BYTES = 8 MiB, not just a bigger ARENA_COUNT.
+//   - Growing that object one step further reallocates old (~4 MiB) and new
+//     (~8 MiB) capacity *simultaneously* for the duration of the copy
+//     (`ralloc::VmAllocator::reallocate` allocates-then-copies-then-frees),
+//     needing ~12 MiB transiently across the pool.
+// 32 MiB leaves comfortable headroom above that ~12 MiB transient worst case
+// for other concurrent allocations (other heap objects, other threads).
+pub(crate) const ARENA_BYTES: usize = 8 * 1024 * 1024;
 const ARENA_ALIGN: usize = 64;
 pub(crate) const MAX_NATIVE_ALIGNMENT: usize = 4096;
 
@@ -150,7 +169,10 @@ pub(crate) fn reallocate_aligned(ptr: *mut c_void, size: usize, align: usize) ->
     // SAFETY: `new_ptr` is a fresh allocation of at least `size` bytes, `ptr`
     // was validated as a live allocation of `old_size` bytes, and allocator
     // ownership rules make overlapping live allocations invalid.
-    unsafe { ptr::copy_nonoverlapping(ptr.cast::<u8>(), new_ptr, cmp::min(old_size, size)) };
+    let copied = cmp::min(old_size, size);
+    unsafe { ptr::copy_nonoverlapping(ptr.cast::<u8>(), new_ptr, copied) };
+    #[cfg(any(test, feature = "testing-hooks"))]
+    crate::instrumentation::record_bytes_copied(copied);
 
     deallocate(ptr);
     new_ptr.cast::<c_void>()
@@ -206,7 +228,6 @@ fn realloc_copy_guard_snapshot_for_tests(ptr: *mut c_void) -> ReallocCopyGuardSn
 /// Any returned non-null pointer must be used according to the C allocator
 /// contract: it may be passed back to Ralloc's `free` or `realloc` functions
 /// exactly as documented by those functions.
-#[cfg_attr(feature = "cdylib", unsafe(no_mangle))]
 pub unsafe extern "C" fn ralloc_malloc(size: usize) -> *mut c_void {
     allocate(size)
 }
@@ -221,7 +242,6 @@ pub unsafe extern "C" fn ralloc_malloc(size: usize) -> *mut c_void {
 ///
 /// Any returned non-null pointer must be used according to the C allocator
 /// contract: it may be passed back to Ralloc's `free` function exactly once.
-#[cfg_attr(feature = "cdylib", unsafe(no_mangle))]
 pub unsafe extern "C" fn ralloc_aligned_alloc(alignment: usize, size: usize) -> *mut c_void {
     allocate_aligned(size, alignment)
 }
@@ -235,7 +255,6 @@ pub unsafe extern "C" fn ralloc_aligned_alloc(alignment: usize, size: usize) -> 
 ///
 /// `ptr` must either be null or a live pointer returned by `ralloc_malloc`,
 /// `ralloc_calloc`, or `ralloc_realloc` that has not already been freed.
-#[cfg_attr(feature = "cdylib", unsafe(no_mangle))]
 pub unsafe extern "C" fn ralloc_free(ptr: *mut c_void) {
     deallocate(ptr);
 }
@@ -249,7 +268,6 @@ pub unsafe extern "C" fn ralloc_free(ptr: *mut c_void) {
 ///
 /// Any returned non-null pointer must be used according to the same ownership
 /// contract as `ralloc_malloc`.
-#[cfg_attr(feature = "cdylib", unsafe(no_mangle))]
 pub unsafe extern "C" fn ralloc_calloc(nmemb: usize, size: usize) -> *mut c_void {
     let Some(total) = nmemb.checked_mul(size) else {
         return ptr::null_mut();
@@ -275,7 +293,6 @@ pub unsafe extern "C" fn ralloc_calloc(nmemb: usize, size: usize) -> *mut c_void
 /// `ptr` must either be null or a live pointer returned by Ralloc that has not
 /// already been freed. If this function returns null, the original allocation
 /// remains owned by the caller unless `size` is zero.
-#[cfg_attr(feature = "cdylib", unsafe(no_mangle))]
 pub unsafe extern "C" fn ralloc_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     reallocate(ptr, size)
 }
@@ -405,8 +422,11 @@ mod tests {
         let _guard = region::TEST_LOCK.lock();
         super::reset_for_tests();
 
-        let first = unsafe { ralloc_malloc(40 * 1024) };
-        let second = unsafe { ralloc_malloc(40 * 1024) };
+        // Each allocation is just over half an arena, so the first fits in
+        // arena 0 but the second cannot and must overflow into arena 1.
+        let chunk = (super::ARENA_BYTES / 2) + 1024;
+        let first = unsafe { ralloc_malloc(chunk) };
+        let second = unsafe { ralloc_malloc(chunk) };
 
         assert!(!first.is_null());
         assert!(!second.is_null());

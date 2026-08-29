@@ -1,17 +1,22 @@
 [package]
-name = "tinyone_ralloc"
-version = "0.1.0"
-edition = "2024"
+name         = "tinyone_ralloc"
+version      = "0.2.0"
+edition      = "2024"
+description  = "Fixed-capacity arena allocator backing the TinyLang v1 runtime"
+license-file = "../../License.rst"
+repository   = "https://github.com/ConnerAdamsMaine/TinyOne"
 
 [lib]
-name = "ralloc"
-path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
+name       = "ralloc"
+path       = "src/lib.rs"
+crate-type = [ "rlib", "cdylib" ]
 
 [features]
-default = ["rlib"]
-rlib = []
-cdylib = []
+default       = [ "rlib" ]
+rlib          = [  ]
+cdylib        = [  ]
+c-staticlib   = [  ]
+testing-hooks = [  ]
 
 [dependencies]
 
