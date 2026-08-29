@@ -6,7 +6,6 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value as JsonValue, json};
 use tinyone::{
@@ -58,28 +57,22 @@ fn ffi_abi_version_matches_declared_header_contract() {
 }
 
 struct TestDir {
-    path: PathBuf,
+    _temp: tempfile::TempDir,
+    path:  PathBuf,
 }
 
 impl TestDir {
     fn new(label: &str) -> Self {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("tinyone-abi-api-{label}-{}-{stamp}", std::process::id()));
-        fs::create_dir_all(&path).expect("create temp test dir");
-        Self { path }
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("tinyone-abi-api-{label}-"))
+            .tempdir()
+            .expect("create temp test dir");
+        let path = temp.path().to_path_buf();
+        Self { _temp: temp, path }
     }
 
     fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -523,11 +516,8 @@ int main(void) {
     )
     .expect("write C FFI smoke source");
 
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir
-        .join("../../")
-        .canonicalize()
-        .unwrap_or_else(|_| manifest_dir.join("../../").to_path_buf());
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = tinyone_test_support::repo_root_from_manifest(manifest_dir);
     let sandbox_worker = Path::new(env!("CARGO_BIN_EXE_tinyone-sandbox-worker"));
     let target_dir = sandbox_worker.parent().expect("Cargo sandbox worker path has a parent");
     let dylib = target_dir.join(format!("{}tinyone{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX));
@@ -807,11 +797,13 @@ fn fs_read_rejects_oversized_file_before_buffer_allocation() {
     expect_error_contains(run_source(&source, "vm", &mut Vec::new(), Vec::new()), "file size");
 }
 
+const MAX_FS_LIST_DIR_ENTRIES: usize = 5_000;
+
 #[test]
 fn fs_list_dir_limit_returns_error_not_panic() {
     let dir = TestDir::new("fs-list-limit");
     let padding = "x".repeat(249);
-    for index in 0..5_000 {
+    for index in 0..MAX_FS_LIST_DIR_ENTRIES {
         let name = format!("{index:05}_{padding}");
         File::create(dir.path().join(name)).expect("create directory entry");
     }

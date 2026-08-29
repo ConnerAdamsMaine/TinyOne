@@ -9,7 +9,7 @@ repository   = "https://github.com/ConnerAdamsMaine/TinyOne"
 [lib]
 name       = "ralloc"
 path       = "src/lib.rs"
-crate-type = [ "rlib", "cdylib" ]
+crate-type = [ "rlib", "cdylib", "staticlib" ]
 
 [features]
 default       = [ "rlib" ]
@@ -21,4 +21,6 @@ testing-hooks = []
 [dependencies]
 
 [dev-dependencies]
+tempfile = "3"
 static_assertions = "1"
+tinyone_test_support = { path = "../tinyone_test_support" }
