@@ -10,11 +10,13 @@ use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use crate::runtime::heap::{MapData, MapKey};
 use crate::runtime::sync::{TinyMutex, TinyThreadHandle};
 use crate::runtime::typing::{TypeKind, integer_range, promote_integer, smallest_fit_literal};
 use crate::{
     HeapData,
     Result,
+    TinyHeap,
     TinyMemory,
     TinyOneError,
     TinyRuntimeContext,
@@ -24,17 +26,19 @@ use crate::{
     expect_int,
     expect_string,
     integer_value_from_kind,
+    round_to_kind,
     runtime_cast_int,
     runtime_integer_kind,
     runtime_integer_value,
-    validate_pointer_base,
 };
 
 const MAX_FS_LIST_DIR_ENTRIES: usize = 65_536;
 
 fn expect_kind(value: &Value, kind: &str, operation: &str) -> Result<i64> {
-    let v = expect_int(value, operation)?;
-    Ok(v)
+    if runtime_integer_kind(value).is_none() {
+        return Err(TinyOneError::runtime(format!("{operation} expects {kind}")));
+    }
+    expect_int(value, operation)
 }
 
 fn parse_type_name(text: &str, operation: &str) -> Result<TypeKind> {
@@ -47,6 +51,21 @@ fn runtime_integer_type_name(value: &Value) -> Option<&'static str> {
 
 pub fn b_int_cast(value: &Value, kind: TypeKind, operation: &str) -> Result<Value> {
     runtime_cast_int(value, kind, operation)
+}
+
+/// Casts `value` to a `Value::Float` of the given float `kind`, rounding to
+/// that format's precision (`round_to_kind`). Integer operands are promoted
+/// to `f64` first. This is the only way to produce a non-`Fp64` float in
+/// TinyLang source — float literals are always `Fp64` (see `Op::PushFloat`).
+pub fn b_float_cast(value: &Value, kind: TypeKind, operation: &str) -> Result<Value> {
+    let bits = match value {
+        Value::Float { bits, .. } => *bits,
+        _ => runtime_integer_value(value, operation)? as f64,
+    };
+    Ok(Value::Float {
+        kind,
+        bits: round_to_kind(bits, kind),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -62,8 +81,8 @@ pub fn b_vec_new(context: &mut TinyRuntimeContext) -> Result<Value> {
 }
 
 pub fn b_vec_clear(context: &mut TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let mut heap = context.heap();
     let cleared = {
-        let mut heap = context.heap();
         let object = heap.get_mut(target)?;
         let HeapData::Array(values) = &mut object.data else {
             return Err(TinyOneError::runtime("vec_clear expects a vec/array"));
@@ -72,15 +91,15 @@ pub fn b_vec_clear(context: &mut TinyRuntimeContext, target: &Value) -> Result<V
         values.clear();
         cleared
     };
-    context.heap().record_shrink(cleared.saturating_mul(VALUE_BYTES))?;
+    heap.record_shrink(cleared.saturating_mul(VALUE_BYTES))?;
     Ok(Value::I64(0))
 }
 
 // ---------------------------------------------------------------------------
 // Map helpers (map_new, map_set, map_get, map_has, map_del, map_len, map_keys)
 //
-// Maps are stored as a new HeapData variant Map(Vec<(Value, Value)>) so
-// iteration order is the insertion order; the spec requires this.
+// Map entries remain insertion-ordered in Ralloc storage, with a canonical
+// host-side index used only to locate those encoded entries.
 // ---------------------------------------------------------------------------
 
 pub fn b_map_new(context: &mut TinyRuntimeContext) -> Result<Value> {
@@ -88,126 +107,222 @@ pub fn b_map_new(context: &mut TinyRuntimeContext) -> Result<Value> {
 }
 
 pub fn b_map_set(context: &mut TinyRuntimeContext, target: &Value, key: Value, value: Value) -> Result<Value> {
-    // Clone entries out so we can call map_key_equal without holding the guard.
-    let entries_clone: Vec<(Value, Value)> = {
-        let heap = context.heap();
+    // Keep canonicalization and mutation in one heap-lock window. Pointer-key
+    // validation is part of the language operation, not a preparatory query.
+    let encoded_key = crate::runtime::value_codec::encode_value(&key)?;
+    let encoded_value = crate::runtime::value_codec::encode_value(&value)?;
+    let mut heap = context.heap();
+    let lookup_key = canonical_map_key(&heap, &key)?;
+    b_map_set_encoded(&mut heap, target, lookup_key, encoded_key, encoded_value, value)
+}
+
+/// JIT fast path for the overwhelmingly common counted-loop map key. It
+/// preserves the generic path for every other key shape (including pointers)
+/// while avoiding dynamic numeric coercion on every insert/update.
+pub(crate) fn b_map_set_i64(context: &mut TinyRuntimeContext, target: &Value, key: i64, value: Value) -> Result<Value> {
+    let encoded_key = crate::runtime::value_codec::encode_i64(key);
+    let encoded_value = crate::runtime::value_codec::encode_value(&value)?;
+    let mut heap = context.heap();
+    b_map_set_encoded(&mut heap, target, Some(MapKey::Integer(i128::from(key))), encoded_key, encoded_value, value)
+}
+
+fn b_map_set_encoded(
+    heap: &mut TinyHeap,
+    target: &Value,
+    lookup_key: Option<MapKey>,
+    encoded_key: [u8; crate::runtime::value_codec::ENCODED_VALUE_BYTES],
+    encoded_value: [u8; crate::runtime::value_codec::ENCODED_VALUE_BYTES],
+    value: Value,
+) -> Result<Value> {
+    let mut inserted = false;
+    let address = match target {
+        Value::Heap(reference) => reference.address,
+        _ => return Err(TinyOneError::runtime("Expected heap pointer")),
+    };
+    let existing = {
         let object = heap.get(target)?;
         let HeapData::Map(entries) = &object.data else {
             return Err(TinyOneError::runtime("map_set expects a map"));
         };
-        entries.clone()
+        indexed_map_index(heap, entries, lookup_key.as_ref())?
     };
-
-    let mut existing: Option<usize> = None;
-    for (idx, (k, _)) in entries_clone.iter().enumerate() {
-        if map_key_equal(context, k, &key)? {
-            existing = Some(idx);
-            break;
-        }
-    }
-
     if existing.is_none() {
-        context
-            .heap()
-            .ensure_can_allocate_delta(VALUE_BYTES.saturating_mul(2))?;
+        heap.ensure_can_allocate_delta(VALUE_BYTES.saturating_mul(2))?;
     }
-    let mut inserted = false;
     {
-        let mut heap = context.heap();
-        let object = heap.get_mut(target)?;
+        // `heap.get(target)` validated the generation and this is an exclusive
+        // heap borrow, so the live occupant cannot change before this mutation.
+        let object = heap
+            .objects
+            .get_mut(address)
+            .and_then(Option::as_mut)
+            .expect("validated map slot remains live");
         let HeapData::Map(entries) = &mut object.data else {
             return Err(TinyOneError::runtime("map_set expects a map"));
         };
         if let Some(idx) = existing {
-            let Some((_, existing_value)) = entries.get_mut(idx) else {
-                return Err(TinyOneError::runtime("map_set: internal index error"));
-            };
-            *existing_value = value.clone();
+            let slot = entries
+                .get_mut(idx)
+                .ok_or_else(|| TinyOneError::runtime("map_set: internal index error"))?;
+            slot[crate::runtime::value_codec::ENCODED_VALUE_BYTES..].copy_from_slice(&encoded_value);
         } else {
-            entries.push((key, value.clone()));
+            let index = entries.len();
+            let mut pair = [0u8; 2 * crate::runtime::value_codec::ENCODED_VALUE_BYTES];
+            let width = crate::runtime::value_codec::ENCODED_VALUE_BYTES;
+            pair[..width].copy_from_slice(&encoded_key);
+            pair[width..].copy_from_slice(&encoded_value);
+            entries.push(&pair)?;
+            if matches!(&lookup_key, Some(MapKey::Pointer { .. })) {
+                entries.pointer_indices.push(index);
+            }
+            if let Some(lookup_key) = lookup_key {
+                entries.index.insert(lookup_key, index);
+            }
             inserted = true;
         }
     }
     if inserted {
-        context.heap().record_growth(VALUE_BYTES.saturating_mul(2))?;
+        heap.record_growth(VALUE_BYTES.saturating_mul(2))?;
     }
     Ok(value)
 }
 
 pub fn b_map_get(context: &mut TinyRuntimeContext, target: &Value, key: &Value) -> Result<Value> {
-    // Clone entries out so we can call map_key_equal without holding the guard.
-    let entries_clone: Vec<(Value, Value)> = {
-        let heap = context.heap();
-        let object = heap.get(target)?;
-        let HeapData::Map(entries) = &object.data else {
-            return Err(TinyOneError::runtime("map_get expects a map"));
-        };
-        entries.clone()
+    let heap = context.heap();
+    let lookup_key = canonical_map_key(&heap, key)?;
+    let object = heap.get(target)?;
+    let HeapData::Map(entries) = &object.data else {
+        return Err(TinyOneError::runtime("map_get expects a map"));
     };
-    for (k, v) in &entries_clone {
-        if map_key_equal(context, k, key)? {
-            return Ok(v.clone());
-        }
-    }
-    Err(TinyOneError::runtime("map_get: missing key"))
+    let index = indexed_map_index(&heap, entries, lookup_key.as_ref())?
+        .ok_or_else(|| TinyOneError::runtime("map_get: missing key"))?;
+    crate::runtime::heap::decode_map_value(entries, index)
+        .ok_or_else(|| TinyOneError::runtime("map_get: internal index error"))
+}
+
+/// Integer-key counterpart of [`b_map_get`] used by direct JIT builtin calls.
+/// Pointer-sidecar validation remains in `indexed_map_index`, so maps that
+/// contain pointer keys retain stale-pointer rejection regardless of lookup
+/// key type.
+pub(crate) fn b_map_get_i64(context: &mut TinyRuntimeContext, target: &Value, key: i64) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::Map(entries) = &object.data else {
+        return Err(TinyOneError::runtime("map_get expects a map"));
+    };
+    let lookup_key = MapKey::Integer(i128::from(key));
+    let index = indexed_map_index(&heap, entries, Some(&lookup_key))?
+        .ok_or_else(|| TinyOneError::runtime("map_get: missing key"))?;
+    crate::runtime::heap::decode_map_value(entries, index)
+        .ok_or_else(|| TinyOneError::runtime("map_get: internal index error"))
 }
 
 pub fn b_map_has(context: &TinyRuntimeContext, target: &Value, key: &Value) -> Result<Value> {
-    // Clone entries so map_key_equal can acquire the guard independently.
-    let entries_clone: Vec<(Value, Value)> = {
-        let heap = context.heap();
-        let object = heap.get(target)?;
-        let HeapData::Map(entries) = &object.data else {
-            return Err(TinyOneError::runtime("map_has expects a map"));
-        };
-        entries.clone()
+    let heap = context.heap();
+    let lookup_key = canonical_map_key(&heap, key)?;
+    let object = heap.get(target)?;
+    let HeapData::Map(entries) = &object.data else {
+        return Err(TinyOneError::runtime("map_has expects a map"));
     };
-    for (k, _) in &entries_clone {
-        if map_key_equal(context, k, key)? {
-            return Ok(Value::I64(1));
-        }
-    }
-    Ok(Value::I64(0))
+    Ok(Value::I64(indexed_map_index(&heap, entries, lookup_key.as_ref())?.is_some() as i64))
 }
 
 pub fn b_map_del(context: &mut TinyRuntimeContext, target: &Value, key: &Value) -> Result<Value> {
-    // Clone entries so map_key_equal can acquire the guard independently.
-    let entries_clone: Vec<(Value, Value)> = {
-        let heap = context.heap();
+    let mut heap = context.heap();
+    let lookup_key = canonical_map_key(&heap, key)?;
+    let to_remove = {
         let object = heap.get(target)?;
         let HeapData::Map(entries) = &object.data else {
             return Err(TinyOneError::runtime("map_del expects a map"));
         };
-        entries.clone()
-    };
-
-    let to_remove: Option<usize> = {
-        let mut found = None;
-        for (idx, (k, _)) in entries_clone.iter().enumerate() {
-            if map_key_equal(context, k, key)? {
-                found = Some(idx);
-                break;
-            }
-        }
-        found
+        indexed_map_index(&heap, entries, lookup_key.as_ref())?
     };
     let removed = if let Some(idx) = to_remove {
-        let mut heap = context.heap();
-        let object = heap.get_mut(target)?;
-        let HeapData::Map(entries) = &mut object.data else {
-            return Err(TinyOneError::runtime("map_del expects a map"));
-        };
-        entries.remove(idx);
+        {
+            let object = heap.get_mut(target)?;
+            let HeapData::Map(entries) = &mut object.data else {
+                return Err(TinyOneError::runtime("map_del expects a map"));
+            };
+            entries.remove(idx);
+            entries.remove_index(idx);
+        }
+        heap.record_shrink(VALUE_BYTES.saturating_mul(2))?;
         true
     } else {
         false
     };
-    if removed {
-        context.heap().record_shrink(VALUE_BYTES.saturating_mul(2))?;
-        Ok(Value::I64(1))
-    } else {
-        Ok(Value::I64(0))
+    if removed { Ok(Value::I64(1)) } else { Ok(Value::I64(0)) }
+}
+
+fn validate_map_pointer_base(
+    heap: &TinyHeap,
+    address: usize,
+    generation: u64,
+    kind: crate::runtime::value::PointerKind,
+) -> Result<()> {
+    if kind == crate::runtime::value::PointerKind::Null && address == 0 {
+        return Ok(());
     }
+    match kind {
+        crate::runtime::value::PointerKind::Object
+        | crate::runtime::value::PointerKind::Array
+        | crate::runtime::value::PointerKind::Buffer
+        | crate::runtime::value::PointerKind::Field => {
+            heap.get_address(address, generation)?;
+            Ok(())
+        }
+        crate::runtime::value::PointerKind::Null => {
+            Err(TinyOneError::runtime(format!("map key got unknown raw pointer kind {kind:?}")))
+        }
+    }
+}
+
+fn canonical_map_key(heap: &TinyHeap, value: &Value) -> Result<Option<MapKey>> {
+    match value {
+        Value::I64(_) | Value::U8(_) | Value::U16(_) | Value::U32(_) => {
+            Ok(Some(MapKey::Integer(runtime_integer_value(value, "map key")?)))
+        }
+        Value::Pointer(pointer) => {
+            validate_map_pointer_base(heap, pointer.address, pointer.generation, pointer.kind)?;
+            Ok(Some(MapKey::Pointer {
+                address:    pointer.address,
+                kind:       pointer.kind,
+                index:      pointer.index,
+                field:      pointer.field.clone(),
+                generation: pointer.generation,
+            }))
+        }
+        Value::Heap(reference) => {
+            let Ok(object) = heap.get(value) else {
+                return Ok(None);
+            };
+            match &object.data {
+                HeapData::String(text) => Ok(Some(MapKey::String(crate::runtime::heap::heap_str(text)?.to_owned()))),
+                _ => {
+                    Ok(Some(MapKey::HeapObject {
+                        address:    reference.address,
+                        generation: reference.generation,
+                    }))
+                }
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn indexed_map_index(heap: &TinyHeap, entries: &MapData, lookup_key: Option<&MapKey>) -> Result<Option<usize>> {
+    // Preserve the contract that any stale pointer key invalidates the map
+    // operation. Reading only its encoded base avoids allocating the stored
+    // field name, and validation shares this operation's existing heap lock.
+    for index in &entries.pointer_indices {
+        let encoded = crate::runtime::heap::encoded_map_key(entries, *index)
+            .ok_or_else(|| TinyOneError::runtime("map: internal pointer index error"))?;
+        let (address, generation, kind) = crate::runtime::value_codec::encoded_pointer_base(encoded)
+            .ok_or_else(|| TinyOneError::runtime("map: invalid pointer sidecar entry"))?;
+        validate_map_pointer_base(heap, address, generation, kind)?;
+    }
+
+    Ok(lookup_key.and_then(|lookup_key| entries.index.get(lookup_key).copied()))
 }
 
 pub fn b_map_len(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
@@ -226,7 +341,10 @@ pub fn b_map_keys(context: &mut TinyRuntimeContext, target: &Value) -> Result<Va
         let HeapData::Map(entries) = &object.data else {
             return Err(TinyOneError::runtime("map_keys expects a map"));
         };
-        entries.iter().map(|(k, _)| k.clone()).collect()
+        crate::runtime::heap::decode_map_entries(entries)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
     };
     Ok(Value::Heap(context.heap().alloc_array(keys)?))
 }
@@ -238,47 +356,12 @@ pub fn b_map_values(context: &mut TinyRuntimeContext, target: &Value) -> Result<
         let HeapData::Map(entries) = &object.data else {
             return Err(TinyOneError::runtime("map_values expects a map"));
         };
-        entries.iter().map(|(_, v)| v.clone()).collect()
+        crate::runtime::heap::decode_map_entries(entries)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect()
     };
     Ok(Value::Heap(context.heap().alloc_array(values)?))
-}
-
-fn map_key_equal(context: &TinyRuntimeContext, lhs: &Value, rhs: &Value) -> Result<bool> {
-    match (lhs, rhs) {
-        (
-            Value::I64(_) | Value::U8(_) | Value::U16(_) | Value::U32(_),
-            Value::I64(_) | Value::U8(_) | Value::U16(_) | Value::U32(_),
-        ) => Ok(runtime_integer_value(lhs, "map key")? == runtime_integer_value(rhs, "map key")?),
-        (Value::Pointer(a), Value::Pointer(b)) => {
-            validate_pointer_base(context, a, "map key")?;
-            validate_pointer_base(context, b, "map key")?;
-            Ok(a.kind == b.kind
-                && a.address == b.address
-                && a.generation == b.generation
-                && a.index == b.index
-                && a.field == b.field)
-        }
-        (Value::Heap(_), Value::Heap(_)) => {
-            // Strings are interned by content for map equality; this matches
-            // typing_system.md's "keys must support stable equality" rule.
-            // Acquire each guard independently to avoid double-lock.
-            let lhs_data = context.heap().get(lhs).ok().map(|o| o.data.clone());
-            let rhs_data = context.heap().get(rhs).ok().map(|o| o.data.clone());
-            match (lhs_data, rhs_data) {
-                (Some(HeapData::String(left)), Some(HeapData::String(right))) => Ok(left == right),
-                (Some(_), Some(_)) => {
-                    match (lhs, rhs) {
-                        (Value::Heap(la), Value::Heap(rb)) => {
-                            Ok(la.address == rb.address && la.generation == rb.generation)
-                        }
-                        _ => Ok(false),
-                    }
-                }
-                _ => Ok(false),
-            }
-        }
-        _ => Ok(false),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -466,7 +549,7 @@ pub fn b_str_is_utf8(context: &mut TinyRuntimeContext, target: &Value) -> Result
     let HeapData::Buffer(bytes) = &object.data else {
         return Err(TinyOneError::runtime("str_is_utf8 expects a String or Buffer"));
     };
-    Ok(Value::I64(std::str::from_utf8(bytes).is_ok() as i64))
+    Ok(Value::I64(std::str::from_utf8(bytes.as_slice()).is_ok() as i64))
 }
 
 pub fn b_str_from_buffer(context: &mut TinyRuntimeContext, target: &Value) -> Result<Value> {
@@ -476,7 +559,7 @@ pub fn b_str_from_buffer(context: &mut TinyRuntimeContext, target: &Value) -> Re
         let HeapData::Buffer(bytes) = &object.data else {
             return Err(TinyOneError::runtime("str_from_buffer expects a Buffer"));
         };
-        bytes.clone()
+        bytes.as_slice().to_vec()
     };
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| TinyOneError::runtime("str_from_buffer: invalid UTF-8"))?
@@ -584,29 +667,34 @@ pub fn b_atomic_add(context: &TinyRuntimeContext, target: &Value, delta: &Value)
     }
 }
 
-pub fn b_thread_spawn(context: &mut TinyRuntimeContext, args: Vec<Value>) -> Result<Value> {
+pub fn b_thread_spawn(
+    context: &mut TinyRuntimeContext,
+    global_memory: &TinyMemory,
+    caller_function: Option<usize>,
+    args: &[Value],
+) -> Result<Value> {
     let fn_name = {
         let heap = context.heap();
         let obj = heap.get(&args[0])?;
         let HeapData::String(s) = &obj.data else {
             return Err(TinyOneError::runtime("thread_spawn: first argument must be a function name string"));
         };
-        s.clone()
+        crate::runtime::heap::heap_str(s)?.to_owned()
     };
 
-    let program_arc = context
-        .program_arc
+    let verified = context
+        .verified_program
         .clone()
-        .ok_or_else(|| TinyOneError::runtime("thread_spawn: runtime has no compiled program"))?;
+        .ok_or_else(|| TinyOneError::runtime("thread_spawn: runtime has no verified program"))?;
+    let program_arc = verified.program_arc();
 
     let fn_args = args[1..].to_vec();
     let (fn_index, fn_param_count) = program_arc
-        .functions
-        .iter()
-        .enumerate()
-        .find(|(_, f)| f.name == fn_name)
-        .map(|(i, f)| (i, f.param_count))
-        .ok_or_else(|| TinyOneError::runtime(format!("thread_spawn: function {:?} not found", fn_name)))?;
+        .callable_function_from(caller_function, &fn_name)
+        .map(|(index, function)| (index, function.param_count))
+        .ok_or_else(|| {
+            TinyOneError::runtime(format!("thread_spawn: function {:?} not found or not exported", fn_name))
+        })?;
 
     if fn_args.len() != fn_param_count {
         return Err(TinyOneError::runtime(format!(
@@ -618,13 +706,18 @@ pub fn b_thread_spawn(context: &mut TinyRuntimeContext, args: Vec<Value>) -> Res
     }
 
     let heap_arc = Arc::clone(&context.heap_arc);
+    let thread_globals = global_memory.try_clone()?;
+    let sys_args = context.sys_args.clone();
+    let sys_env = context.sys_env.clone();
 
     let handle = std::thread::spawn(move || {
-        let slot_count = program_arc.functions[fn_index].slot_count;
         let mut thread_ctx = TinyRuntimeContext::with_heap(heap_arc);
         thread_ctx.program_arc = Some(Arc::clone(&program_arc));
-        let vm = VM::new_unchecked_with_context(Arc::clone(&program_arc), TinyMemory::new(slot_count), thread_ctx);
+        thread_ctx.verified_program = Some(verified.clone());
+        thread_ctx.set_sys_args(sys_args);
+        thread_ctx.set_sys_env(sys_env);
         let mut thread_stdout: Vec<u8> = Vec::new();
+        let vm = VM::new_unchecked_with_context(&verified, thread_globals, thread_ctx);
         let result = vm.run_function_by_index(fn_index, fn_args, &mut thread_stdout);
         (result, thread_stdout)
     });
@@ -633,7 +726,7 @@ pub fn b_thread_spawn(context: &mut TinyRuntimeContext, args: Vec<Value>) -> Res
     Ok(Value::Heap(context.heap().alloc_thread(thread_handle)?))
 }
 
-pub fn b_thread_join(context: &mut TinyRuntimeContext, args: Vec<Value>) -> Result<Value> {
+pub fn b_thread_join(context: &mut TinyRuntimeContext, args: &[Value]) -> Result<Value> {
     let handle_arc = {
         let heap = context.heap();
         let object = heap.get(&args[0])?;
@@ -693,13 +786,11 @@ fn variant_field(
     if object.type_name != type_name {
         return Err(TinyOneError::runtime(format!("{operation}: expected {type_name}, got {:?}", object.type_name)));
     }
-    let HeapData::Struct(fields) = &object.data else {
+    let HeapData::Struct(record) = &object.data else {
         return Err(TinyOneError::runtime(format!("{operation}: corrupt {type_name}")));
     };
-    fields
-        .iter()
-        .find(|(name, _)| name == field)
-        .map(|(_, value)| value.clone())
+    record
+        .get(field)
         .ok_or_else(|| TinyOneError::runtime(format!("{operation}: missing {field}")))
 }
 
@@ -781,6 +872,255 @@ pub fn b_option_unwrap(context: &TinyRuntimeContext, target: &Value) -> Result<V
         return Err(TinyOneError::runtime("option_unwrap: called on None"));
     }
     variant_payload(context, target, "tinyone.option.Option", "option_unwrap")
+}
+
+// ---------------------------------------------------------------------------
+// Runtime scaffold types with language-visible representations.
+//
+// These values are deliberately exposed through small constructors and
+// accessors rather than through Rust-only heap allocation.  The accessors
+// preserve the representation's invariants and make every operation useful
+// from TinyLang without requiring a static type checker first.
+// ---------------------------------------------------------------------------
+
+fn unsigned_u32(value: &Value, operation: &str) -> Result<u32> {
+    let value = expect_int(value, operation)?;
+    u32::try_from(value).map_err(|_| TinyOneError::runtime(format!("{operation}: expected a non-negative u32")))
+}
+
+pub fn b_closure_new(
+    context: &mut TinyRuntimeContext,
+    caller_function: Option<usize>,
+    function_name: &Value,
+    captures: &Value,
+) -> Result<Value> {
+    let name = expect_string(context, function_name, "closure_new")?;
+    let captured_values = {
+        let heap = context.heap();
+        let object = heap.get(captures)?;
+        let HeapData::Array(values) = &object.data else {
+            return Err(TinyOneError::runtime("closure_new expects an array of captures"));
+        };
+        crate::runtime::heap::decode_array_values(values)
+    };
+    let program = context
+        .program_arc
+        .as_ref()
+        .ok_or_else(|| TinyOneError::runtime("closure_new: runtime has no compiled program"))?;
+    let function_id = program
+        .callable_function_from(caller_function, &name)
+        .map(|(index, _)| index)
+        .ok_or_else(|| TinyOneError::runtime(format!("closure_new: function {name:?} not found or not exported")))?;
+    Ok(Value::Heap(context.heap().alloc_closure(function_id as u32, captured_values)?))
+}
+
+pub fn b_closure_function(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::Closure { function_id, .. } = &object.data else {
+        return Err(TinyOneError::runtime("closure_function expects a Closure"));
+    };
+    Ok(Value::I64(*function_id as i64))
+}
+
+pub fn b_closure_captures(context: &mut TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let values = {
+        let heap = context.heap();
+        let object = heap.get(target)?;
+        let HeapData::Closure { captures, .. } = &object.data else {
+            return Err(TinyOneError::runtime("closure_captures expects a Closure"));
+        };
+        crate::runtime::heap::decode_array_values(captures)
+    };
+    Ok(Value::Heap(context.heap().alloc_array(values)?))
+}
+
+pub fn b_sum_new(context: &mut TinyRuntimeContext, tag: &Value, payload: Option<&Value>) -> Result<Value> {
+    let tag = unsigned_u32(tag, "sum_new")?;
+    Ok(Value::Heap(context.heap().alloc_sum(tag, payload.cloned())?))
+}
+
+pub fn b_sum_tag(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::Sum { tag, .. } = &object.data else {
+        return Err(TinyOneError::runtime("sum_tag expects a Sum"));
+    };
+    Ok(Value::I64(*tag as i64))
+}
+
+pub fn b_sum_has_payload(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::Sum { payload, .. } = &object.data else {
+        return Err(TinyOneError::runtime("sum_has_payload expects a Sum"));
+    };
+    Ok(Value::I64(payload.is_some() as i64))
+}
+
+pub fn b_sum_unwrap(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::Sum { payload, .. } = &object.data else {
+        return Err(TinyOneError::runtime("sum_unwrap expects a Sum"));
+    };
+    payload
+        .as_ref()
+        .map(crate::runtime::heap::decode_value_slot)
+        .ok_or_else(|| TinyOneError::runtime("sum_unwrap: variant has no payload"))
+}
+
+pub fn b_tagged_union_new(context: &mut TinyRuntimeContext, tag: &Value, payload: &Value) -> Result<Value> {
+    Ok(Value::Heap(
+        context
+            .heap()
+            .alloc_tagged_union(unsigned_u32(tag, "tagged_union_new")?, payload.clone())?,
+    ))
+}
+
+pub fn b_tagged_union_tag(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::TaggedUnion { tag, .. } = &object.data else {
+        return Err(TinyOneError::runtime("tagged_union_tag expects a TaggedUnion"));
+    };
+    Ok(Value::I64(*tag as i64))
+}
+
+pub fn b_tagged_union_unwrap(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::TaggedUnion { payload, .. } = &object.data else {
+        return Err(TinyOneError::runtime("tagged_union_unwrap expects a TaggedUnion"));
+    };
+    Ok(crate::runtime::heap::decode_value_slot(payload))
+}
+
+pub fn b_dyn_new(context: &mut TinyRuntimeContext, type_id: &Value, vtable_id: &Value, value: &Value) -> Result<Value> {
+    let type_id = u16::try_from(unsigned_u32(type_id, "dyn_new")?)
+        .map_err(|_| TinyOneError::runtime("dyn_new: type id exceeds u16"))?;
+    let vtable_id = unsigned_u32(vtable_id, "dyn_new")?;
+    Ok(Value::Heap(context.heap().alloc_dyn(type_id, vtable_id, value.clone())?))
+}
+
+pub fn b_dyn_metadata(context: &TinyRuntimeContext, target: &Value, want_vtable: bool) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::Dyn { type_id, vtable_id, .. } = &object.data else {
+        return Err(TinyOneError::runtime("dyn metadata expects a Dyn"));
+    };
+    Ok(Value::I64(if want_vtable {
+        *vtable_id as i64
+    } else {
+        *type_id as i64
+    }))
+}
+
+pub fn b_dyn_unwrap(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::Dyn { value, .. } = &object.data else {
+        return Err(TinyOneError::runtime("dyn_unwrap expects a Dyn"));
+    };
+    Ok(crate::runtime::heap::decode_value_slot(value))
+}
+
+pub fn b_box_new(context: &mut TinyRuntimeContext, value: &Value) -> Result<Value> {
+    Ok(Value::Heap(context.heap().alloc_box(value.clone())?))
+}
+
+pub fn b_box_get(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let HeapData::Box(value) = &object.data else {
+        return Err(TinyOneError::runtime("box_get expects a Box"));
+    };
+    Ok(crate::runtime::heap::decode_value_slot(value))
+}
+
+pub fn b_box_set(context: &mut TinyRuntimeContext, target: &Value, value: &Value) -> Result<Value> {
+    let mut heap = context.heap();
+    let object = heap.get_mut(target)?;
+    let HeapData::Box(bytes) = &mut object.data else {
+        return Err(TinyOneError::runtime("box_set expects a Box"));
+    };
+    let encoded = crate::runtime::value_codec::encode_value(value)?;
+    bytes.as_mut_slice().copy_from_slice(&encoded);
+    Ok(value.clone())
+}
+
+pub fn b_char_new(context: &mut TinyRuntimeContext, value: &Value) -> Result<Value> {
+    let scalar = unsigned_u32(value, "char_new")?;
+    char::from_u32(scalar).ok_or_else(|| TinyOneError::runtime("char_new: invalid Unicode scalar value"))?;
+    Ok(Value::Heap(context.heap().alloc_char(scalar)?))
+}
+
+pub fn b_fd_new(context: &mut TinyRuntimeContext, value: &Value) -> Result<Value> {
+    let fd = i32::try_from(expect_int(value, "fd_new")?)
+        .map_err(|_| TinyOneError::runtime("fd_new: descriptor exceeds i32"))?;
+    Ok(Value::Heap(context.heap().alloc_file_descriptor(fd)?))
+}
+
+pub fn b_char_buffer_new(context: &mut TinyRuntimeContext, values: &Value) -> Result<Value> {
+    let chars = {
+        let heap = context.heap();
+        let object = heap.get(values)?;
+        let HeapData::Array(values) = &object.data else {
+            return Err(TinyOneError::runtime("char_buffer_new expects an array"));
+        };
+        crate::runtime::heap::decode_array_values(values)
+            .iter()
+            .map(|value| unsigned_u32(value, "char_buffer_new"))
+            .collect::<Result<Vec<_>>>()?
+    };
+    for scalar in &chars {
+        char::from_u32(*scalar)
+            .ok_or_else(|| TinyOneError::runtime("char_buffer_new: invalid Unicode scalar value"))?;
+    }
+    Ok(Value::Heap(context.heap().alloc_char_buffer(chars)?))
+}
+
+pub fn b_record_new(context: &mut TinyRuntimeContext, source: &Value) -> Result<Value> {
+    let fields = {
+        let heap = context.heap();
+        let object = heap.get(source)?;
+        match &object.data {
+            HeapData::Struct(record) | HeapData::Record(record) => record.fields(),
+            _ => {
+                return Err(TinyOneError::runtime("record_new expects a struct or record"));
+            }
+        }
+    };
+    Ok(Value::Heap(context.heap().alloc_record(fields)?))
+}
+
+pub fn b_dictionary_new(context: &mut TinyRuntimeContext, source: &Value) -> Result<Value> {
+    let entries = {
+        let heap = context.heap();
+        let object = heap.get(source)?;
+        match &object.data {
+            HeapData::Map(entries) => crate::runtime::heap::decode_map_entries(entries),
+            HeapData::Dictionary(entries) => crate::runtime::heap::decode_map_entries(entries),
+            _ => {
+                return Err(TinyOneError::runtime("dictionary_new expects a map or dictionary"));
+            }
+        }
+    };
+    Ok(Value::Heap(context.heap().alloc_dictionary(entries)?))
+}
+
+pub fn b_alloc_new(context: &mut TinyRuntimeContext, type_name: &Value, buffer: &Value) -> Result<Value> {
+    let type_name = expect_string(context, type_name, "alloc_new")?;
+    let kind = parse_type_name(&type_name, "alloc_new")?;
+    let bytes = {
+        let heap = context.heap();
+        let object = heap.get(buffer)?;
+        let HeapData::Buffer(bytes) = &object.data else {
+            return Err(TinyOneError::runtime("alloc_new expects a Buffer"));
+        };
+        bytes.as_slice().to_vec()
+    };
+    Ok(Value::Heap(context.heap().alloc_raw(kind, bytes)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -893,7 +1233,7 @@ pub fn b_fs_write(context: &mut TinyRuntimeContext, target: &Value, buffer: &Val
         let HeapData::Buffer(bytes) = &object.data else {
             return Err(TinyOneError::runtime("fs_write expects a buffer payload"));
         };
-        bytes.clone()
+        bytes.as_slice().to_vec()
     };
     std::fs::write(&path, &bytes).map_err(|error| TinyOneError::runtime(format!("fs_write: {error}")))?;
     Ok(Value::I64(bytes.len() as i64))
@@ -1019,7 +1359,6 @@ pub fn b_type_of(context: &mut TinyRuntimeContext, value: &Value) -> Result<Valu
             runtime_integer_type_name(value).unwrap_or(TypeKind::I64.name())
         }
         Value::U64(_) => TypeKind::U64.name(),
-        Value::Bf16(_) => TypeKind::Bf16.name(),
         Value::Float { kind, .. } => kind.name(),
         Value::Bool(_) => TypeKind::Bool.name(),
         Value::Unit => TypeKind::Unit.name(),
@@ -1029,14 +1368,16 @@ pub fn b_type_of(context: &mut TinyRuntimeContext, value: &Value) -> Result<Valu
         Value::Phantom => TypeKind::Phantom.name(),
         Value::Zst(_) => TypeKind::Zst.name(),
         Value::Unsafe => TypeKind::Unsafe.name(),
-        Value::Pointer(p) if p.kind == "null" && p.address == 0 => TypeKind::Null.name(),
+        Value::Pointer(p) if p.kind == crate::runtime::value::PointerKind::Null && p.address == 0 => {
+            TypeKind::Null.name()
+        }
         Value::Pointer(_) => TypeKind::Pointer.name(),
         Value::Heap(_) => {
             let heap = context.heap();
             let object = heap.get(value)?;
             match &object.data {
                 HeapData::String(_) => TypeKind::String.name(),
-                HeapData::Array(_) => TypeKind::Vec.name(),
+                HeapData::Array(_) => TypeKind::Array.name(),
                 HeapData::Buffer(_) => TypeKind::Buffer.name(),
                 HeapData::Struct(_) => {
                     if object.type_name == "tinyone.result.Result" {
@@ -1048,29 +1389,25 @@ pub fn b_type_of(context: &mut TinyRuntimeContext, value: &Value) -> Result<Valu
                     }
                 }
                 HeapData::Map(_) => TypeKind::Map.name(),
-                HeapData::Cell(_) => TypeKind::Alloc.name(),
+                HeapData::Cell(_) => TypeKind::Cell.name(),
                 HeapData::Mutex(_) => TypeKind::Mutex.name(),
                 HeapData::Atomic(_) => TypeKind::Atomic.name(),
                 HeapData::Thread(_) => TypeKind::Thread.name(),
-                HeapData::Char(_)
-                | HeapData::CharBuffer(_)
-                | HeapData::Vec(_)
-                | HeapData::Record(_)
-                | HeapData::Dictionary(_)
-                | HeapData::Box(_)
-                | HeapData::Alloc { .. }
-                | HeapData::Closure { .. }
-                | HeapData::Sum { .. }
-                | HeapData::Enum { .. }
-                | HeapData::TaggedUnion { .. }
-                | HeapData::Result { .. }
-                | HeapData::Option { .. }
-                | HeapData::Dyn { .. }
-                | HeapData::FileDescriptor(_) => {
-                    unimplemented!(
-                        "Phase 2: type_of() not yet implemented for this HeapData variant — grep 'Phase 2:' to find all stubs"
-                    )
-                }
+                HeapData::Enum { .. } => TypeKind::Enum.name(),
+                HeapData::Char(_) => TypeKind::Char.name(),
+                HeapData::CharBuffer(_) => TypeKind::CharBuffer.name(),
+                HeapData::Vec(_) => TypeKind::Vec.name(),
+                HeapData::Record(_) => TypeKind::Record.name(),
+                HeapData::Dictionary(_) => TypeKind::Dictionary.name(),
+                HeapData::Box(_) => TypeKind::Box.name(),
+                HeapData::Alloc { .. } => TypeKind::Alloc.name(),
+                HeapData::Closure { .. } => TypeKind::Closure.name(),
+                HeapData::Sum { .. } => TypeKind::Sum.name(),
+                HeapData::TaggedUnion { .. } => TypeKind::TaggedUnion.name(),
+                HeapData::Result { .. } => TypeKind::Result.name(),
+                HeapData::Option { .. } => TypeKind::Option.name(),
+                HeapData::Dyn { .. } => TypeKind::Dyn.name(),
+                HeapData::FileDescriptor(_) => TypeKind::FileDescriptor.name(),
             }
         }
     };

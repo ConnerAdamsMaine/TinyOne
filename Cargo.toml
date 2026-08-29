@@ -1,8 +1,6 @@
 [workspace]
-members = [
-    "crates/tinyone_*",
-    "crates/xtask",
-]
+members = ["crates/tinyone_*", "crates/xtask"]
+exclude = [".archive"]
 default-members = ["crates/tinyone_core"]
 resolver = "3"
 

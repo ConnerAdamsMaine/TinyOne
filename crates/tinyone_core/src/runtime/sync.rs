@@ -4,6 +4,8 @@ use std::thread::{self, ThreadId};
 
 use crate::{Result, TinyOneError, Value};
 
+type ThreadResult = (Result<Value>, Vec<u8>);
+
 #[derive(Debug)]
 pub(crate) struct TinyMutex {
     // None = unlocked; Some(tid) = locked by thread tid
@@ -38,8 +40,10 @@ impl TinyMutex {
         Ok(())
     }
 
-    /// Release the mutex. Returns a runtime error if not currently locked.
+    /// Release the mutex. Returns a runtime error if it is unlocked or owned
+    /// by another thread.
     pub(crate) fn unlock(&self) -> Result<()> {
+        let current = thread::current().id();
         let mut state = self
             .state
             .lock()
@@ -47,18 +51,22 @@ impl TinyMutex {
         if state.is_none() {
             return Err(TinyOneError::runtime("mutex_unlock: mutex is not locked"));
         }
+        if *state != Some(current) {
+            return Err(TinyOneError::runtime("mutex_unlock: mutex is owned by another thread"));
+        }
         *state = None;
         self.cond.notify_one();
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn is_locked(&self) -> bool {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 }
 
 pub(crate) struct TinyThreadHandle {
-    pub(crate) inner: Mutex<Option<std::thread::JoinHandle<(Result<Value>, Vec<u8>)>>>,
+    pub(crate) inner: Mutex<Option<std::thread::JoinHandle<ThreadResult>>>,
 }
 
 impl fmt::Debug for TinyThreadHandle {
@@ -68,7 +76,7 @@ impl fmt::Debug for TinyThreadHandle {
 }
 
 impl TinyThreadHandle {
-    pub(crate) fn new(handle: std::thread::JoinHandle<(Result<Value>, Vec<u8>)>) -> Arc<Self> {
+    pub(crate) fn new(handle: std::thread::JoinHandle<ThreadResult>) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Some(handle)),
         })
@@ -125,5 +133,19 @@ mod tests {
         });
         m.unlock().unwrap();
         t.join().unwrap();
+    }
+
+    #[test]
+    fn tinymutex_rejects_unlock_from_non_owner() {
+        let m = TinyMutex::new();
+        m.lock().unwrap();
+        let m2 = Arc::clone(&m);
+        let error = std::thread::spawn(move || m2.unlock())
+            .join()
+            .expect("unlocking thread should not panic")
+            .expect_err("non-owner unlock must fail");
+        assert!(error.to_string().contains("owned by another thread"));
+        assert!(m.is_locked());
+        m.unlock().unwrap();
     }
 }
