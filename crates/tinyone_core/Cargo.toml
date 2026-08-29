@@ -1,11 +1,16 @@
 [package]
-name = "tinylang"
-version = "0.6.0"
-edition = "2024"
+name         = "tinylang"
+version      = "1.5.1"
+edition      = "2024"
+description  = "TinyLang v1 compiler, verified bytecode runtime, adaptive JIT, and C ABI"
+license-file = "../../License.rst"
+repository   = "https://github.com/ConnerAdamsMaine/TinyOne"
+readme       = "../../README.rst"
+exclude      = [ "main.rs" ]
 
 [features]
-default = []
-testing-hooks = []
+default       = [  ]
+testing-hooks = [ "ralloc/testing-hooks" ]
 
 [lib]
 name       = "tinyone"
@@ -15,10 +20,17 @@ crate-type = [ "rlib", "cdylib" ]
 name = "tinylang"
 path = "src/main.rs"
 
+## TODO(@mrdwarf7): [refactor] Move this to a separate crate for benchmarking and testing.
 [[bin]]
 name = "tinylang_bench"
 path = "src/bin/tinylang_bench.rs"
 
+## TODO(@mrdwarf7): [refactor] Move this to a separate crate for benchmarking and testing.
+[[bin]]
+name = "tinyone-sandbox-worker"
+path = "src/bin/tinyone-sandbox-worker.rs"
+
+## TODO(@mrdwarf7): [refactor] Move this to a separate crate for benchmarking and testing.
 [[test]]
 name              = "language_suite"
 path              = "tests/language_suite.rs"
@@ -26,8 +38,12 @@ harness           = false
 required-features = [ "testing-hooks" ]
 
 [dependencies]
-thiserror = "2"
-blake2 = "0.10"
-hex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+thiserror     = "2"
+blake2        = "0.10"
+hex           = "0.4"
+serde         = { version = "1", features = [ "derive" ] }
+serde_json    = "1"
+toml          = "0.8"
+ed25519-dalek = { version = "2", default-features = false, features = [ "std" ] }
+sha2          = "0.10"
+ralloc        = { version = "0.2.0", path = "../../Ralloc" }

@@ -376,7 +376,29 @@ fn tiny_allocator_log_grows_bounded() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 10: ralloc_vm_alloc_double_deallocate_rejected (type-level compile check)
+// Test 10: ralloc_vm_alloc_round_trips_through_the_real_allocator
+//
+// `ralloc` is now a real dependency of the `tinylang` crate, so this test
+// exercises `ralloc::VmAllocator` directly (not through `TinyAllocator`) to
+// confirm the dependency wiring resolves correctly from this integration
+// test's own compilation unit, not just from unit tests inside the Ralloc
+// crate itself.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ralloc_vm_alloc_round_trips_through_the_real_allocator() {
+    use ralloc::VmAllocator;
+
+    let vm = VmAllocator::global();
+    let mut alloc = vm.allocate(32).expect("allocation should succeed");
+    assert_eq!(alloc.len(), 32);
+    alloc.as_mut_slice().fill(0x5A);
+    assert!(alloc.as_slice().iter().all(|&b| b == 0x5A));
+    vm.deallocate(alloc); // consumes `alloc` by value
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 10b: ralloc_vm_alloc_double_deallocate_rejected (type-level compile check)
 //
 // VmAllocation is !Clone + !Copy.  VmAllocator::deallocate() consumes the
 // VmAllocation by value (move semantics).  Therefore attempting to call
@@ -390,9 +412,9 @@ fn tiny_allocator_log_grows_bounded() {
 //
 // If you want to verify the compile error manually, try adding:
 //
-//   let alloc = vm.allocate(32, 8).unwrap();
-//   vm.deallocate(alloc).unwrap();   // consumes alloc
-//   vm.deallocate(alloc).unwrap();   // ERROR: use of moved value
+//   let alloc = vm.allocate(32).unwrap();
+//   vm.deallocate(alloc);   // consumes alloc
+//   vm.deallocate(alloc);   // ERROR: use of moved value
 //
 // to a file and observing the rustc error E0382.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -400,20 +422,11 @@ fn tiny_allocator_log_grows_bounded() {
 #[test]
 #[ignore = "compile-time guarantee: VmAllocation is !Clone+!Copy; second deallocate is E0382"]
 fn ralloc_vm_alloc_double_deallocate_rejected() {
-    // Ralloc is not wired as a dependency of the tinyone integration test harness.
-    // Were it available, the test would be:
-    //
-    //   use ralloc::VmAllocator;
-    //   let vm = VmAllocator::global();
-    //   let alloc = vm.allocate(32, 8).expect("alloc");
-    //   vm.deallocate(alloc).expect("first dealloc consumes the handle");
-    //   // The following line does not compile (E0382):
-    //   // vm.deallocate(alloc).expect("second dealloc");
-    //
     // The move-only design of VmAllocation (no Clone, no Copy, no Drop impl,
-    // consumed by deallocate) makes this a zero-cost compile-time guarantee.
-    // No runtime sentinel, no generation check, no flag — Rust's ownership
-    // system enforces it structurally.
+    // consumed by deallocate) makes double-free a zero-cost compile-time
+    // guarantee. No runtime sentinel, no generation check, no flag — Rust's
+    // ownership system enforces it structurally. See test 10 above for the
+    // real, runnable single-deallocate round trip.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -462,6 +475,59 @@ fn tiny_allocator_reallocate_stale_gen_returns_error() {
 
     // Clean up.
     alloc.free(77, 1, 0).unwrap();
+}
+
+// ── Bonus B2: TinyAllocator's native allocation is real, not a placeholder ──
+//
+// A single Ralloc allocation cannot exceed one arena
+// (`ralloc::VmAllocator::max_allocation_size()`). Filling every arena with
+// one allocation each, then requesting one more of the same size, proves
+// `allocate()` is now backed by a real, capacity-bounded native allocator
+// (Phase 2 always succeeded regardless of size). Freeing one of the four and
+// retrying proves `free()` genuinely returns native space to Ralloc rather
+// than only updating table bookkeeping.
+
+#[test]
+fn tiny_allocator_native_allocation_is_real_and_reclaimed_by_free() {
+    let alloc = TinyAllocator::with_defaults();
+
+    // Large enough that only one such allocation fits per arena, small
+    // enough that it still fits within a single arena.
+    let chunk = ralloc::VmAllocator::max_allocation_size() * 3 / 4;
+    let arena_count = ralloc::VmAllocator::capacity() / ralloc::VmAllocator::max_allocation_size();
+
+    let mut filled = Vec::new();
+    for i in 0..arena_count {
+        let result = alloc
+            .allocate(9_000 + i, 1, AllocKind::Buffer, chunk, 0)
+            .unwrap_or_else(|e| panic!("arena {i} of {arena_count} should have room: {e:?}"));
+        filled.push(result);
+    }
+
+    // Every arena now holds one `chunk`-sized allocation; there is no room
+    // left anywhere in the pool for another one.
+    let err = alloc
+        .allocate(9_999, 1, AllocKind::Buffer, chunk, 0)
+        .expect_err("no arena should have room for one more chunk-sized allocation");
+    assert!(
+        matches!(err, TinyAllocatorError::NativeAllocFailed),
+        "expected NativeAllocFailed once every arena is full, got {err:?}"
+    );
+
+    // Freeing one allocation returns its arena's space to Ralloc.
+    let freed = filled.pop().unwrap();
+    alloc.free(freed.vm_address, freed.vm_generation, 0).unwrap();
+
+    let reclaimed = alloc
+        .allocate(9_999, 1, AllocKind::Buffer, chunk, 0)
+        .expect("allocation should succeed once free() has reclaimed an arena's space");
+
+    // Clean up so this test doesn't leak native pool space that other tests
+    // in this binary may depend on.
+    alloc.free(reclaimed.vm_address, reclaimed.vm_generation, 0).unwrap();
+    for result in filled {
+        alloc.free(result.vm_address, result.vm_generation, 0).unwrap();
+    }
 }
 
 // ── Bonus C: AllocTable.get after mark_dead returns None via all_live but ──
@@ -659,4 +725,41 @@ fn alloc_table_concurrent_mixed_operations() {
 
     // Table must be empty after all concurrent removes complete.
     assert!(table.is_empty(), "table must be empty after all concurrent removes");
+}
+
+// ── Bonus J: allocate_owned records bookkeeping without a native table entry ──
+//
+// `HeapData::String`/`Buffer`/`CharBuffer` now own their real `VmAllocation`
+// directly (via `RallocBytes`), so `TinyHeap` records their bookkeeping
+// through `TinyAllocator::allocate_owned` instead of `allocate` — this must
+// NOT make a second real Ralloc allocation (that would double-book the
+// arena for the most common heap object kinds), and the resulting record's
+// `native_handle` must be `None` so `free()`/`shutdown_drain()`'s existing
+// "nothing to release here" branch applies without any special-casing.
+
+#[test]
+fn tiny_allocator_allocate_owned_records_bookkeeping_without_native_entry() {
+    let alloc = TinyAllocator::with_defaults();
+
+    let before = alloc.stats();
+    let result = alloc
+        .allocate_owned(42, 1, AllocKind::String, 13, 0)
+        .expect("allocate_owned should succeed");
+    assert_eq!(result.vm_address, 42);
+    assert_eq!(result.effective_size, 13);
+
+    let after_alloc = alloc.stats();
+    assert_eq!(after_alloc.live_count, before.live_count + 1);
+    assert_eq!(after_alloc.live_bytes, before.live_bytes + 13);
+    assert_eq!(after_alloc.total_allocated, before.total_allocated + 1);
+
+    // free() must succeed even though allocate_owned never touched the
+    // native side table (no VmAllocation to release here — RallocBytes
+    // owns and releases the real memory itself).
+    alloc.free(42, 1, 0).expect("free should succeed for an owned record");
+
+    let after_free = alloc.stats();
+    assert_eq!(after_free.live_count, before.live_count);
+    assert_eq!(after_free.live_bytes, before.live_bytes);
+    assert_eq!(after_free.total_freed, before.total_freed + 1);
 }

@@ -20,14 +20,13 @@ mod ralloc;
 mod region;
 mod sync;
 
-pub use buffer::{RallocBox, RallocBuffer, RallocError};
-
-// Re-export C ABI functions for Rust consumers
-pub use ralloc::{ralloc_aligned_alloc, ralloc_calloc, ralloc_free, ralloc_malloc, ralloc_realloc};
-
 // Panic handler for no_std builds (cdylib, i.e. when rlib is NOT active)
 #[cfg(not(feature = "rlib"))]
 use core::panic::PanicInfo;
+
+pub use buffer::{RallocBox, RallocBuffer, RallocError};
+// Re-export C ABI functions for Rust consumers
+pub use ralloc::{ralloc_aligned_alloc, ralloc_calloc, ralloc_free, ralloc_malloc, ralloc_realloc};
 
 #[cfg(not(feature = "rlib"))]
 #[panic_handler]

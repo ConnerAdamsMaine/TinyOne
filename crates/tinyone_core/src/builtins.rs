@@ -714,6 +714,173 @@ pub(crate) const BUILTINS: &[BuiltinDef] = &[
         max_args:        1,
         requires_unsafe: false,
     },
+    // Float precision casts: fp8 (E4M3), fp16 (IEEE-754 half), fp32
+    // (native), fp64 (identity for floats). The only way to produce a
+    // non-Fp64 float in TinyLang source.
+    BuiltinDef {
+        name:            "fp8",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "fp16",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "fp32",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "fp64",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    // Runtime algebraic/callable values. These are intentionally appended:
+    // builtin indexes are part of the bytecode artifact format.
+    BuiltinDef {
+        name:            "closure_new",
+        min_args:        2,
+        max_args:        2,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "closure_function",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "closure_captures",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "sum_new",
+        min_args:        1,
+        max_args:        2,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "sum_tag",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "sum_has_payload",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "sum_unwrap",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "tagged_union_new",
+        min_args:        2,
+        max_args:        2,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "tagged_union_tag",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "tagged_union_unwrap",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "dyn_new",
+        min_args:        3,
+        max_args:        3,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "dyn_type_id",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "dyn_vtable_id",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "dyn_unwrap",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "box_new",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "box_get",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "box_set",
+        min_args:        2,
+        max_args:        2,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "char_new",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "fd_new",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: true,
+    },
+    BuiltinDef {
+        name:            "char_buffer_new",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "record_new",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "dictionary_new",
+        min_args:        1,
+        max_args:        1,
+        requires_unsafe: false,
+    },
+    BuiltinDef {
+        name:            "alloc_new",
+        min_args:        2,
+        max_args:        2,
+        requires_unsafe: true,
+    },
 ];
 
 pub(crate) fn builtin_index(name: &str) -> Option<usize> {

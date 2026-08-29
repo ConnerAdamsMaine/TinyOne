@@ -3,12 +3,15 @@ use std::rc::Rc;
 
 use crate::{
     BUILTINS,
+    EnumVariantDef,
     Function,
     Instr,
     Lexer,
+    ModuleCapabilities,
     ModuleDef,
     ModuleImportDef,
     ModuleInfo,
+    ModulePermissions,
     Op,
     Program,
     Resolver,
@@ -20,6 +23,7 @@ use crate::{
     TinyOneError,
     Token,
     TokenKind,
+    VmSettings,
     builtin_index,
     default_import_alias,
     module_name_from_import,
@@ -55,10 +59,14 @@ pub(crate) struct Compiler {
     shared:                 SharedState,
     local_function_indexes: HashMap<String, usize>,
     local_struct_indexes:   HashMap<String, usize>,
+    local_enum_names:       HashSet<String>,
     function_globals:       HashMap<String, usize>,
     loops:                  Vec<LoopContext>,
     in_function:            bool,
     unsafe_depth:           usize,
+    root_capabilities:      ModuleCapabilities,
+    root_permissions:       ModulePermissions,
+    vm_settings:            VmSettings,
 }
 
 impl Compiler {
@@ -68,6 +76,7 @@ impl Compiler {
         resolver: Option<Resolver>,
         module_mode: bool,
         module_name: impl Into<String>,
+        module_permissions: ModulePermissions,
         shared: SharedState,
     ) -> Result<Self> {
         let source = source.into();
@@ -89,6 +98,8 @@ impl Compiler {
                         filename.clone(),
                         ModuleInfo {
                             name:             name.clone(),
+                            capabilities:     module_permissions.capabilities(),
+                            permissions:      module_permissions,
                             function_exports: HashMap::new(),
                             struct_exports:   HashMap::new(),
                             all_functions:    HashSet::new(),
@@ -126,11 +137,29 @@ impl Compiler {
             shared,
             local_function_indexes: HashMap::new(),
             local_struct_indexes: HashMap::new(),
+            local_enum_names: HashSet::new(),
             function_globals: HashMap::new(),
             loops: Vec::new(),
             in_function: false,
             unsafe_depth: 0,
+            root_capabilities: ModuleCapabilities::all(),
+            root_permissions: ModulePermissions::from_capabilities(ModuleCapabilities::all()),
+            vm_settings: VmSettings::default(),
         })
+    }
+
+    /// Applies the project policy to the root compilation unit. Nested module
+    /// compilers only contribute definitions to the shared state, so their
+    /// temporary Program values never become executable artifacts.
+    pub(crate) fn with_runtime_policy(
+        mut self,
+        root_capabilities: ModuleCapabilities,
+        vm_settings: VmSettings,
+    ) -> Self {
+        self.root_capabilities = root_capabilities;
+        self.root_permissions = ModulePermissions::from_capabilities(root_capabilities);
+        self.vm_settings = vm_settings;
+        self
     }
 
     pub(crate) fn compile(&mut self) -> Result<Program> {
@@ -144,6 +173,10 @@ impl Compiler {
                 TokenKind::Struct => {
                     self.accept_imports = false;
                     self.struct_definition(false)?;
+                }
+                TokenKind::Enum => {
+                    self.accept_imports = false;
+                    self.enum_definition(false)?;
                 }
                 TokenKind::Fn => {
                     self.accept_imports = false;
@@ -165,14 +198,19 @@ impl Compiler {
         self.finalize_module()?;
         let state = self.shared.borrow();
         Ok(Program {
-            code:       self.code.clone(),
-            slot_count: self.symbols.slot_count(),
-            names:      self.symbols.names.clone(),
-            functions:  state.functions.clone(),
-            strings:    state.strings.clone(),
-            structs:    state.structs.clone(),
-            fields:     state.fields.clone(),
-            modules:    state.module_defs.clone(),
+            code:              self.code.clone(),
+            slot_count:        self.symbols.slot_count(),
+            names:             self.symbols.names.clone(),
+            functions:         state.functions.clone(),
+            strings:           state.strings.clone(),
+            structs:           state.structs.clone(),
+            fields:            state.fields.clone(),
+            modules:           state.module_defs.clone(),
+            enum_variants:     state.enum_variants.clone(),
+            root_capabilities: self.root_capabilities,
+            root_permissions:  self.root_permissions.clone(),
+            policy_trusted:    true,
+            vm_settings:       self.vm_settings,
         })
     }
 
@@ -209,6 +247,8 @@ impl Compiler {
                 imports: info.imports.clone(),
                 exported_functions,
                 exported_structs,
+                capabilities: info.capabilities,
+                permissions: info.permissions.clone(),
             }
         };
         state.module_defs.push(def);
@@ -267,12 +307,27 @@ impl Compiler {
                 name_token.pos,
             ));
         }
+        self.skip_optional_type_annotation(TokenKind::Colon)?;
         self.eat(TokenKind::Equal)?;
         self.expression()?;
         let slot = self.symbols.define_current(&name_token.text).ok_or_else(|| {
             self.error(format!("Variable {:?} is already defined in this scope", name_token.text), name_token.clone())
         })?;
         self.emit(Op::Store, slot as i64, 0);
+        Ok(())
+    }
+
+    /// Consumes and discards an optional type annotation introduced by
+    /// `marker` (`Colon` for `let`/parameter annotations, `Arrow` for
+    /// function return-type annotations). TinyLang has no static type
+    /// checker (dynamically typed by design — see `docs/v2-roadmap.md`);
+    /// annotations are syntax-only documentation with no effect on compiled
+    /// bytecode.
+    fn skip_optional_type_annotation(&mut self, marker: TokenKind) -> Result<()> {
+        if self.current().kind == marker {
+            self.eat(marker)?;
+            self.eat(TokenKind::Ident)?;
+        }
         Ok(())
     }
 
@@ -418,8 +473,10 @@ impl Compiler {
         };
         let resolver = self
             .resolver
+            .as_ref()
             .ok_or_else(|| self.error("Imports require compiling from a source file", path_token.clone()))?;
-        let (module_filename, module_source) = resolver(&self.filename, &path_token.text)?;
+        let resolved_module = resolver.borrow_mut().resolve_import(&self.filename, &path_token.text)?;
+        let module_filename = resolved_module.filename;
         if self.namespaces.contains_key(&alias) || self.symbols.contains(&alias) {
             return Err(self.error_at(format!("Import namespace {alias:?} is already defined"), alias_pos));
         }
@@ -445,11 +502,12 @@ impl Compiler {
             }
             let compile_result = (|| {
                 let mut compiler = Compiler::new(
-                    module_source,
+                    resolved_module.source,
                     module_filename.clone(),
-                    self.resolver,
+                    self.resolver.clone(),
                     true,
                     module_name_from_import(&path_token.text, &module_filename),
+                    resolved_module.permissions,
                     Rc::clone(&self.shared),
                 )?;
                 compiler.compile().map(|_| ())
@@ -465,6 +523,9 @@ impl Compiler {
             .get(&module_filename)
             .cloned()
             .ok_or_else(|| TinyOneError::compile("Internal import state error"))?;
+        if let Some(resolver) = &self.resolver {
+            resolver.borrow_mut().record_module_name(&module_filename, &info.name);
+        }
         self.namespaces.insert(alias.clone(), info.clone());
         self.module_imports.push(ModuleImportDef {
             alias,
@@ -543,6 +604,94 @@ impl Compiler {
         Ok(())
     }
 
+    /// Parses `enum Name { Variant, Variant(field, field), ... }`.
+    ///
+    /// Enum declarations are file-local only (no cross-module export, unlike
+    /// `struct`) — `exported` is accepted for call-site symmetry with
+    /// `struct_definition`/`function_definition` but currently unused.
+    fn enum_definition(&mut self, exported: bool) -> Result<()> {
+        let _ = exported;
+        self.eat(TokenKind::Enum)?;
+        let name_token = self.eat(TokenKind::Ident)?;
+        let name = name_token.text.clone();
+        if self.namespaces.contains_key(&name) {
+            return Err(self.error(format!("Enum {name:?} conflicts with an imported namespace"), name_token));
+        }
+        if self.local_enum_names.contains(&name) {
+            return Err(self.error(format!("Enum {name:?} is already defined"), name_token));
+        }
+        if self.local_struct_indexes.contains_key(&name)
+            || self.local_function_indexes.contains_key(&name)
+            || builtin_index(&name).is_some()
+        {
+            return Err(self.error(format!("Enum {name:?} conflicts with an existing callable"), name_token));
+        }
+
+        let full_name = self.qualified_declaration_name(&name);
+        self.eat(TokenKind::LBrace)?;
+        let mut seen_variants = HashSet::new();
+        let mut tag: u32 = 0;
+        if self.current().kind != TokenKind::RBrace {
+            loop {
+                let variant_token = self.eat(TokenKind::Ident)?;
+                if !seen_variants.insert(variant_token.text.clone()) {
+                    return Err(self.error(format!("Duplicate enum variant {:?}", variant_token.text), variant_token));
+                }
+
+                let mut fields = Vec::new();
+                if self.current().kind == TokenKind::LParen {
+                    self.eat(TokenKind::LParen)?;
+                    let mut seen_fields = HashSet::new();
+                    if self.current().kind != TokenKind::RParen {
+                        loop {
+                            let field_token = self.eat(TokenKind::Ident)?;
+                            if field_token.text == "tag" {
+                                return Err(self.error("Enum variant field \"tag\" is reserved", field_token));
+                            }
+                            if !seen_fields.insert(field_token.text.clone()) {
+                                return Err(self.error(
+                                    format!("Duplicate enum variant field {:?}", field_token.text),
+                                    field_token,
+                                ));
+                            }
+                            self.intern_field(&field_token.text);
+                            fields.push(field_token.text);
+                            if self.current().kind != TokenKind::Comma {
+                                break;
+                            }
+                            self.eat(TokenKind::Comma)?;
+                        }
+                    }
+                    self.eat(TokenKind::RParen)?;
+                }
+
+                {
+                    let mut state = self.shared.borrow_mut();
+                    let variant_index = state.enum_variants.len();
+                    state
+                        .enum_variant_indexes
+                        .insert((full_name.clone(), variant_token.text.clone()), variant_index);
+                    state.enum_variants.push(EnumVariantDef {
+                        enum_name: full_name.clone(),
+                        variant_name: variant_token.text,
+                        tag,
+                        fields,
+                    });
+                }
+                tag += 1;
+
+                if self.current().kind != TokenKind::Comma {
+                    break;
+                }
+                self.eat(TokenKind::Comma)?;
+            }
+        }
+        self.eat(TokenKind::RBrace)?;
+
+        self.local_enum_names.insert(name);
+        Ok(())
+    }
+
     fn function_definition(&mut self, exported: bool) -> Result<()> {
         self.eat(TokenKind::Fn)?;
         let name_token = self.eat(TokenKind::Ident)?;
@@ -557,6 +706,7 @@ impl Compiler {
             return Err(self.error(format!("Function {name:?} conflicts with an existing callable"), name_token));
         }
         let full_name = self.qualified_declaration_name(&name);
+        let generic_params = self.generic_parameter_list()?;
         let function_index = {
             let mut state = self.shared.borrow_mut();
             if state.function_indexes.contains_key(&full_name) {
@@ -592,6 +742,7 @@ impl Compiler {
         if self.current().kind != TokenKind::RParen {
             loop {
                 let param = self.eat(TokenKind::Ident)?;
+                self.skip_optional_type_annotation(TokenKind::Colon)?;
                 let Some(slot) = function_symbols.define_current(&param.text) else {
                     return Err(self.error(format!("Duplicate parameter {:?}", param.text), param));
                 };
@@ -604,6 +755,7 @@ impl Compiler {
             }
         }
         self.eat(TokenKind::RParen)?;
+        self.skip_optional_type_annotation(TokenKind::Arrow)?;
 
         let global_slots = self.symbols.top_level_slots();
         let previous_symbols = std::mem::replace(&mut self.symbols, function_symbols);
@@ -617,6 +769,7 @@ impl Compiler {
             self.emit(Op::Return, 0, 0);
             Ok(Function {
                 name: full_name,
+                generic_params,
                 param_count,
                 code: self.code.clone(),
                 slot_count: self.symbols.slot_count(),
@@ -631,6 +784,31 @@ impl Compiler {
         let function = result?;
         self.shared.borrow_mut().functions.push(function);
         Ok(())
+    }
+
+    /// Parses the v2 declaration form `fn identity<T>(value: T) -> T`.
+    /// TinyOne is dynamically typed, so generic parameters are erased from
+    /// execution; the names remain in `Function` metadata for tooling and
+    /// artifact consumers.
+    fn generic_parameter_list(&mut self) -> Result<Vec<String>> {
+        if self.current().kind != TokenKind::Lt {
+            return Ok(Vec::new());
+        }
+        self.eat(TokenKind::Lt)?;
+        let mut params = Vec::new();
+        loop {
+            let token = self.eat(TokenKind::Ident)?;
+            if params.contains(&token.text) {
+                return Err(self.error(format!("Duplicate generic parameter {:?}", token.text), token));
+            }
+            params.push(token.text);
+            if self.current().kind != TokenKind::Comma {
+                break;
+            }
+            self.eat(TokenKind::Comma)?;
+        }
+        self.eat(TokenKind::Gt)?;
+        Ok(params)
     }
 
     fn qualified_declaration_name(&self, name: &str) -> String {
@@ -758,6 +936,18 @@ impl Compiler {
                     .map_err(|_| self.error(format!("Integer literal {:?} is out of range", token.text), token))?;
                 self.emit(Op::PushInt, value, 0);
             }
+            TokenKind::Float => {
+                self.eat(TokenKind::Float)?;
+                let value = token
+                    .text
+                    .parse::<f64>()
+                    .map_err(|_| self.error(format!("Float literal {:?} is out of range", token.text), token))?;
+                // Floats have no dedicated constant pool; the bit pattern is
+                // carried directly in the instruction's i64 arg (matching
+                // the JSON artifact format's existing raw-bits convention
+                // for floats) and reinterpreted by PushFloat at execution.
+                self.emit(Op::PushFloat, value.to_bits() as i64, 0);
+            }
             TokenKind::String => {
                 self.eat(TokenKind::String)?;
                 let index = self.intern_string(&token.text);
@@ -766,6 +956,14 @@ impl Compiler {
             TokenKind::Null => {
                 self.eat(TokenKind::Null)?;
                 self.emit(Op::PushNull, 0, 0);
+            }
+            TokenKind::True => {
+                self.eat(TokenKind::True)?;
+                self.emit(Op::PushBool, 1, 0);
+            }
+            TokenKind::False => {
+                self.eat(TokenKind::False)?;
+                self.emit(Op::PushBool, 0, 0);
             }
             TokenKind::LBracket => {
                 self.eat(TokenKind::LBracket)?;
@@ -793,6 +991,8 @@ impl Compiler {
                     let name = self.eat(TokenKind::Ident)?;
                     if self.current().kind == TokenKind::LParen {
                         self.call_expression(&name)?;
+                    } else if self.local_function_indexes.contains_key(&name.text) {
+                        self.emit(Op::PushFunction, self.local_function_indexes[&name.text] as i64, 0);
                     } else {
                         self.emit_load_name(&name)?;
                     }
@@ -842,8 +1042,11 @@ impl Compiler {
         matches!(
             self.current().kind,
             TokenKind::Int
+                | TokenKind::Float
                 | TokenKind::String
                 | TokenKind::Null
+                | TokenKind::True
+                | TokenKind::False
                 | TokenKind::Ident
                 | TokenKind::LBracket
                 | TokenKind::LParen
@@ -860,6 +1063,13 @@ impl Compiler {
         if let Some(builtin_index) = builtin_index(&name.text) {
             return self.builtin_call(&name.text, builtin_index, name.pos);
         }
+        if self.symbols.get(&name.text).is_some() {
+            self.emit_load_name(name)?;
+            self.eat(TokenKind::LParen)?;
+            let arg_count = self.argument_list()?;
+            self.emit(Op::CallValue, arg_count as i64, 0);
+            return Ok(());
+        }
         let function_index = self
             .local_function_indexes
             .get(&name.text)
@@ -872,6 +1082,9 @@ impl Compiler {
     }
 
     fn qualified_call_expression(&mut self, namespace: &Token, member: &Token) -> Result<()> {
+        if self.local_enum_names.contains(&namespace.text) {
+            return self.enum_constructor_call(namespace, member);
+        }
         let info =
             self.namespaces.get(&namespace.text).cloned().ok_or_else(|| {
                 self.error_at(format!("Unknown module namespace {:?}", namespace.text), namespace.pos)
@@ -904,6 +1117,34 @@ impl Compiler {
             ));
         }
         self.emit(Op::MakeStruct, struct_index as i64, arg_count as i64);
+        Ok(())
+    }
+
+    fn enum_constructor_call(&mut self, namespace: &Token, member: &Token) -> Result<()> {
+        let full_name = self.qualified_declaration_name(&namespace.text);
+        let variant_index = {
+            let state = self.shared.borrow();
+            state
+                .enum_variant_indexes
+                .get(&(full_name, member.text.clone()))
+                .copied()
+        }
+        .ok_or_else(|| {
+            self.error_at(format!("Enum {:?} has no variant {:?}", namespace.text, member.text), member.pos)
+        })?;
+        let field_count = self.shared.borrow().enum_variants[variant_index].fields.len();
+        self.eat(TokenKind::LParen)?;
+        let arg_count = self.argument_list()?;
+        if arg_count != field_count {
+            return Err(self.error_at(
+                format!(
+                    "Enum variant {}.{} expects {field_count} field value(s), got {arg_count}",
+                    namespace.text, member.text
+                ),
+                self.current().pos,
+            ));
+        }
+        self.emit(Op::MakeEnum, variant_index as i64, arg_count as i64);
         Ok(())
     }
 
@@ -996,10 +1237,10 @@ impl Compiler {
         if let Some(slot) = self.symbols.get(&token.text) {
             return Ok(ReadSlot::Local(slot));
         }
-        if self.in_function {
-            if let Some(slot) = self.function_globals.get(&token.text).copied() {
-                return Ok(ReadSlot::Global(slot));
-            }
+        if self.in_function
+            && let Some(slot) = self.function_globals.get(&token.text).copied()
+        {
+            return Ok(ReadSlot::Global(slot));
         }
         Err(self.error(format!("Undefined variable {:?}", token.text), token.clone()))
     }

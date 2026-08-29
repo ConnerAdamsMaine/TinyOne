@@ -3,9 +3,8 @@ use std::io::Write;
 use std::sync::Arc;
 
 use crate::{
-    BytecodeVerifier,
+    HeapData,
     Instr,
-    MAX_CALL_DEPTH,
     Op,
     Program,
     Result,
@@ -13,7 +12,9 @@ use crate::{
     TinyMemory,
     TinyOneError,
     TinyRuntimeContext,
+    TypeKind,
     Value,
+    VerifiedProgram,
     checked_div,
     checked_non_negative_usize,
     pop_args,
@@ -24,6 +25,7 @@ use crate::{
     runtime_index,
     runtime_is_false,
     runtime_make_array,
+    runtime_make_enum,
     runtime_make_struct,
     runtime_mul,
     runtime_neg,
@@ -67,28 +69,33 @@ fn lookup_field(fields: &[String], index: usize) -> Result<&str> {
 
 impl VM {
     pub fn new(program: Arc<Program>, memory: TinyMemory, inputs: Vec<String>) -> Result<Self> {
-        BytecodeVerifier::verify(&program)?;
-        Ok(Self::new_unchecked(program, memory, inputs))
+        let verified = VerifiedProgram::verify_arc(program)?;
+        Ok(Self::new_unchecked(&verified, memory, inputs))
     }
 
-    /// Construct a VM without re-verifying. Only call this when the caller
-    /// has already run `BytecodeVerifier::verify` on the same program.
-    pub(crate) fn new_unchecked(program: Arc<Program>, memory: TinyMemory, inputs: Vec<String>) -> Self {
+    /// Construct a VM without re-verifying from a verification token.
+    pub(crate) fn new_unchecked(verified: &VerifiedProgram, memory: TinyMemory, inputs: Vec<String>) -> Self {
+        let mut context = TinyRuntimeContext::new(inputs);
+        context.program_arc = Some(verified.program_arc());
+        context.verified_program = Some(verified.clone());
         Self {
-            program,
+            program: verified.program_arc(),
             memory,
-            context: TinyRuntimeContext::new(inputs),
+            context,
             call_depth: 0,
         }
     }
 
     pub(crate) fn new_unchecked_with_context(
-        program: Arc<Program>,
+        verified: &VerifiedProgram,
         memory: TinyMemory,
         context: TinyRuntimeContext,
     ) -> Self {
+        let mut context = context;
+        context.program_arc = Some(verified.program_arc());
+        context.verified_program = Some(verified.clone());
         Self {
-            program,
+            program: verified.program_arc(),
             memory,
             context,
             call_depth: 0,
@@ -110,7 +117,7 @@ impl VM {
     pub fn run_report(mut self, stdout: &mut dyn Write) -> Result<TinyRunReport> {
         let mut memory = std::mem::take(&mut self.memory);
         let code = self.program.code.clone();
-        self.run_chunk(&code, &mut memory, stdout, "main", None)?;
+        self.run_chunk(&code, &mut memory, stdout, "main", None, None)?;
         let heap_before_shutdown = self.context.heap_stats();
         let heap_after_shutdown = self.context.shutdown();
         Ok(TinyRunReport {
@@ -135,12 +142,12 @@ impl VM {
         let slot_count = function.slot_count;
         let fn_name = function.name.clone();
         let code = function.code.clone();
-        let mut memory = TinyMemory::new(slot_count);
+        let mut memory = TinyMemory::try_new(slot_count)?;
         for (i, v) in args.into_iter().enumerate() {
             memory.store(i, v)?;
         }
-        let empty_globals = TinyMemory::new(0);
-        let result = self.run_chunk(&code, &mut memory, stdout, &fn_name, Some(&empty_globals))?;
+        let global_memory = std::mem::take(&mut self.memory);
+        let result = self.run_chunk(&code, &mut memory, stdout, &fn_name, Some(fn_index), Some(&global_memory))?;
         result.ok_or_else(|| TinyOneError::runtime("thread function returned no value"))
     }
 
@@ -150,8 +157,10 @@ impl VM {
         memory: &mut TinyMemory,
         stdout: &mut dyn Write,
         chunk_name: &str,
+        function_index: Option<usize>,
         global_memory: Option<&TinyMemory>,
     ) -> Result<Option<Value>> {
+        let permissions = self.program.capabilities_for_function(function_index);
         let mut stack: Vec<Value> = Vec::with_capacity(code.len().min(32));
         let mut pc = 0usize;
         loop {
@@ -163,6 +172,20 @@ impl VM {
             match instr.op {
                 Op::PushInt => stack.push(Value::I64(instr.arg)),
                 Op::PushNull => stack.push(runtime_null()),
+                Op::PushBool => stack.push(Value::Bool(instr.arg != 0)),
+                Op::PushFloat => {
+                    stack.push(Value::Float {
+                        kind: TypeKind::Fp64,
+                        bits: f64::from_bits(instr.arg as u64),
+                    })
+                }
+                Op::PushFunction => {
+                    let function_index = checked_non_negative_usize(instr.arg, "function index")?;
+                    if function_index >= self.program.functions.len() {
+                        return Err(TinyOneError::runtime(format!("Invalid function index {function_index}")));
+                    }
+                    stack.push(Value::Function(function_index as u32));
+                }
                 Op::Pop => {
                     vm_pop(&mut stack)?;
                 }
@@ -227,6 +250,32 @@ impl VM {
                     let result = self.call_function(function_index, &mut stack, arg_count, stdout, globals)?;
                     stack.push(result);
                 }
+                Op::CallValue => {
+                    let arg_count = checked_non_negative_usize(instr.arg, "call arity")?;
+                    let args = pop_args(&mut stack, arg_count)?;
+                    let callable = vm_pop(&mut stack)?;
+                    let (function_index, call_args) = match callable {
+                        Value::Function(index) => (index as usize, args),
+                        Value::Heap(reference) => {
+                            let captures = {
+                                let heap = self.context.heap();
+                                let object = heap.get(&Value::Heap(reference))?;
+                                let HeapData::Closure { function_id, captures } = &object.data else {
+                                    return Err(TinyOneError::runtime("CallValue expects a function or Closure"));
+                                };
+                                (*function_id as usize, crate::runtime::heap::decode_array_values(captures))
+                            };
+                            let (function_index, mut captures) = captures;
+                            captures.extend(args);
+                            (function_index, captures)
+                        }
+                        _ => {
+                            return Err(TinyOneError::runtime("CallValue expects a function or Closure"));
+                        }
+                    };
+                    let globals = global_memory.unwrap_or(&*memory);
+                    stack.push(self.call_function_with_args(function_index, call_args, stdout, globals)?);
+                }
                 Op::MakeArray => {
                     let count = checked_non_negative_usize(instr.arg, "array arity")?;
                     let values = pop_args(&mut stack, count)?;
@@ -266,11 +315,42 @@ impl VM {
                     let field = lookup_field(&self.program.fields, field_index)?;
                     runtime_set_field(&mut self.context, target, field, value)?;
                 }
+                Op::MakeEnum => {
+                    let field_count = checked_non_negative_usize(instr.arg2, "enum variant arity")?;
+                    let values = pop_args(&mut stack, field_count)?;
+                    let variant_id = checked_non_negative_usize(instr.arg, "enum variant index")?;
+                    let variant_def = self
+                        .program
+                        .enum_variants
+                        .get(variant_id)
+                        .ok_or_else(|| TinyOneError::runtime(format!("Invalid enum variant index {variant_id}")))?;
+                    stack.push(runtime_make_enum(
+                        &mut self.context,
+                        &variant_def.enum_name,
+                        &variant_def.variant_name,
+                        variant_def.tag,
+                        &variant_def.fields,
+                        values,
+                    )?);
+                }
                 Op::Builtin => {
                     let builtin_index = checked_non_negative_usize(instr.arg, "builtin index")?;
                     let arg_count = checked_non_negative_usize(instr.arg2, "builtin arity")?;
-                    let args = pop_args(&mut stack, arg_count)?;
-                    stack.push(runtime_call_builtin(&mut self.context, builtin_index, args)?);
+                    let args_start = stack
+                        .len()
+                        .checked_sub(arg_count)
+                        .ok_or_else(|| TinyOneError::runtime("Stack underflow"))?;
+                    let globals = global_memory.unwrap_or(&*memory);
+                    let result = runtime_call_builtin(
+                        &mut self.context,
+                        globals,
+                        builtin_index,
+                        function_index,
+                        &permissions,
+                        &stack[args_start..],
+                    )?;
+                    stack.truncate(args_start);
+                    stack.push(result);
                 }
                 Op::Return => return Ok(Some(vm_pop(&mut stack)?)),
                 Op::Print => {
@@ -307,6 +387,17 @@ impl VM {
         stdout: &mut dyn Write,
         global_memory: &TinyMemory,
     ) -> Result<Value> {
+        let args = pop_args(caller_stack, arg_count)?;
+        self.call_function_with_args(function_index, args, stdout, global_memory)
+    }
+
+    fn call_function_with_args(
+        &mut self,
+        function_index: usize,
+        args: Vec<Value>,
+        stdout: &mut dyn Write,
+        global_memory: &TinyMemory,
+    ) -> Result<Value> {
         let (fn_name, fn_slot_count, fn_code, fn_param_count) = {
             let function = self
                 .program
@@ -315,22 +406,24 @@ impl VM {
                 .ok_or_else(|| TinyOneError::runtime(format!("Invalid function index {function_index}")))?;
             (function.name.clone(), function.slot_count, function.code.clone(), function.param_count)
         };
-        if arg_count != fn_param_count {
+        if args.len() != fn_param_count {
             return Err(TinyOneError::runtime(format!(
-                "Function {:?} expects {} argument(s), got {arg_count}",
-                fn_name, fn_param_count
+                "Function {:?} expects {} argument(s), got {}",
+                fn_name,
+                fn_param_count,
+                args.len()
             )));
         }
-        if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(TinyOneError::runtime(format!("Call stack overflow after {MAX_CALL_DEPTH} nested call(s)")));
+        let max_call_depth = self.program.max_call_depth();
+        if self.call_depth >= max_call_depth {
+            return Err(TinyOneError::runtime(format!("Call stack overflow after {max_call_depth} nested call(s)")));
         }
-        let args = pop_args(caller_stack, arg_count)?;
-        let mut memory = TinyMemory::new(fn_slot_count);
+        let mut memory = TinyMemory::try_new(fn_slot_count)?;
         for (slot, value) in args.into_iter().enumerate() {
             memory.store(slot, value)?;
         }
         self.call_depth += 1;
-        let result = self.run_chunk(&fn_code, &mut memory, stdout, &fn_name, Some(global_memory));
+        let result = self.run_chunk(&fn_code, &mut memory, stdout, &fn_name, Some(function_index), Some(global_memory));
         self.call_depth -= 1;
         result?.ok_or_else(|| TinyOneError::runtime(format!("Function {:?} returned no value", fn_name)))
     }

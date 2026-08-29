@@ -40,11 +40,19 @@ impl Lexer {
                 while pos < bytes.len() && bytes[pos].is_ascii_digit() {
                     pos += 1;
                 }
+                let mut kind = TokenKind::Int;
+                if pos + 1 < bytes.len() && bytes[pos] == b'.' && bytes[pos + 1].is_ascii_digit() {
+                    kind = TokenKind::Float;
+                    pos += 1;
+                    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+                        pos += 1;
+                    }
+                }
                 tokens.push(Token {
-                    kind: TokenKind::Int,
+                    kind,
                     text: self.source[start..pos].to_string(),
-                    pos:  start,
-                    end:  pos,
+                    pos: start,
+                    end: pos,
                 });
                 continue;
             }
@@ -171,12 +179,15 @@ fn keyword_kind(text: &str) -> Option<TokenKind> {
         "break" => TokenKind::Break,
         "continue" => TokenKind::Continue,
         "struct" => TokenKind::Struct,
+        "enum" => TokenKind::Enum,
         "import" => TokenKind::Import,
         "export" => TokenKind::Export,
         "as" => TokenKind::As,
         "set" => TokenKind::Set,
         "unsafe" => TokenKind::Unsafe,
         "null" => TokenKind::Null,
+        "true" => TokenKind::True,
+        "false" => TokenKind::False,
         _ => return None,
     })
 }
@@ -189,6 +200,7 @@ fn two_char_token(text: &str) -> Option<TokenKind> {
         "||" => TokenKind::PipePipe,
         "<=" => TokenKind::Lte,
         ">=" => TokenKind::Gte,
+        "->" => TokenKind::Arrow,
         _ => return None,
     })
 }
@@ -211,6 +223,7 @@ fn single_char_token(ch: u8) -> Option<TokenKind> {
         b']' => TokenKind::RBracket,
         b'.' => TokenKind::Dot,
         b',' => TokenKind::Comma,
+        b':' => TokenKind::Colon,
         _ => return None,
     })
 }

@@ -3,7 +3,9 @@ mod api;
 mod artifact_io;
 mod builtins;
 mod bytecode;
+mod compile_cache;
 mod compiler;
+mod config;
 mod error;
 mod ffi;
 #[cfg(any(test, feature = "testing-hooks"))]
@@ -21,17 +23,29 @@ pub mod vm_hooks;
 
 pub use api::{
     compile_file,
+    compile_file_cached,
+    compile_file_cached_verified,
+    compile_file_cached_verified_with_options,
+    compile_file_cached_verified_with_status,
+    compile_file_unoptimized,
+    compile_file_unoptimized_verified,
+    compile_file_verified,
     compile_source,
     compile_source_unoptimized,
+    compile_source_unoptimized_verified,
+    compile_source_unoptimized_verified_with_filename,
     compile_source_unoptimized_with_filename,
+    compile_source_verified,
+    compile_source_verified_with_filename,
     compile_source_with_filename,
     lex_source,
     optimize_program,
 };
-pub use artifact_io::{load_artifact, write_artifact};
+pub use artifact_io::{load_artifact, load_verified_artifact, write_artifact, write_binary_artifact};
 pub(crate) use builtins::{BUILTINS, builtin_index};
 pub use bytecode::{
     BytecodeVerifier,
+    EnumVariantDef,
     Function,
     Instr,
     ModuleDef,
@@ -42,22 +56,65 @@ pub use bytecode::{
     StructDef,
     VerifiedProgram,
 };
+pub(crate) use bytecode::{ModuleCapabilities, ModuleCapability, ModulePermissions};
+pub use compile_cache::CompileCacheStatus;
 pub(crate) use compiler::{
     Compiler,
     CompilerSharedState,
     ModuleInfo,
+    ModuleResolver,
     Resolver,
+    ResolverInput,
     SharedState,
     SymbolTable,
+    content_digest,
     default_import_alias,
     module_name_from_import,
-    resolve_import,
+    patch_module,
+    read_source_file,
     unique_module_name,
 };
+pub(crate) use config::ProjectConfig;
+pub use config::{
+    authority_certificate_digest,
+    authority_certificate_payload,
+    canonical_module_signature_payload,
+    module_dependency_lock_hash,
+    module_signature_digest,
+    module_source_hash,
+};
 pub use error::{Result, TinyOneError};
-pub(crate) use jit::{HOT_BACK_EDGE_THRESHOLD, JitChunk, JitFunction, JitOp, JitVm};
-pub use jit::{JitCache, JitCacheStats, JitProgram, JitStats, write_jit_listing};
-pub use runner::{run_program, run_program_report, run_program_with_env, run_source, run_source_report};
+#[doc(hidden)]
+pub use ffi::sandbox_worker_main;
+pub use jit::{
+    DEFAULT_HOT_BACK_EDGE_THRESHOLD,
+    DEFAULT_SOURCE_CACHE_MAX_BYTES,
+    DEFAULT_SOURCE_CACHE_MAX_ENTRIES,
+    JitCache,
+    JitCacheStats,
+    JitExecutionProfile,
+    JitOpcodeProfile,
+    JitOptions,
+    JitProgram,
+    JitStats,
+    write_jit_listing,
+    write_verified_jit_listing,
+};
+pub(crate) use jit::{JitBuiltin, JitChunk, JitOp, JitVm};
+pub use runner::{
+    run_program,
+    run_program_report,
+    run_program_with_env,
+    run_program_with_env_and_jit_options,
+    run_program_with_jit_options,
+    run_source,
+    run_source_report,
+    run_verified_program,
+    run_verified_program_report,
+    run_verified_program_with_env,
+    run_verified_program_with_env_and_jit_options,
+    run_verified_program_with_jit_options,
+};
 pub(crate) use runtime::{
     HeapData,
     MAX_ARRAY_LENGTH,
@@ -69,6 +126,7 @@ pub(crate) use runtime::{
     TinyRuntimeContext,
     VALUE_BYTES,
     Value,
+    VmSettings,
     checked_bounded_len,
     checked_byte_range,
     checked_collection_index,
@@ -82,6 +140,8 @@ pub(crate) use runtime::{
     floor_div,
     integer_value_from_kind,
     pop_args,
+    require_builtin_capability,
+    round_to_kind,
     runtime_add,
     runtime_add_int,
     runtime_array_pop,
@@ -98,6 +158,7 @@ pub(crate) use runtime::{
     runtime_is_false,
     runtime_make_array,
     runtime_make_buffer,
+    runtime_make_enum,
     runtime_make_field_pointer,
     runtime_make_pointer,
     runtime_make_struct,

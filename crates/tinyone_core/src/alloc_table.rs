@@ -5,18 +5,15 @@
 //! `vm_address`. The generation field mirrors `TinyHeap::generations` so that
 //! stale [`HeapRef`]s are rejected without consulting the heap itself.
 //!
-//! Phase 2 will replace [`VmAllocHandle`] with the real Ralloc handle type and
-//! wire the table's `insert`/`remove` calls to actual allocator operations.
+//! The table stores a small opaque id while the move-only Ralloc allocation
+//! handle lives in `TinyAllocator`'s side table.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 // ── Handle ────────────────────────────────────────────────────────────────────
 
-/// Opaque placeholder for a Ralloc native allocation handle.
-///
-/// Will be replaced with the actual Ralloc type in Phase 2. The inner `u64`
-/// is treated as an opaque token; callers must not construct or interpret it.
+/// Opaque id for a move-only Ralloc native allocation held by `TinyAllocator`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VmAllocHandle(pub u64);
 
@@ -90,7 +87,8 @@ pub struct AllocRecord {
     pub vm_address:    usize,
     /// Generation counter at the time of allocation (`HeapRef::generation`).
     pub vm_generation: u64,
-    /// Native allocator handle, or `None` if not yet backed by Ralloc.
+    /// Ralloc allocation id, or `None` when the heap object owns its Ralloc
+    /// bytes directly (for example, strings and buffers).
     pub native_handle: Option<VmAllocHandle>,
     /// The kind of heap object stored in this slot.
     pub kind:          AllocKind,
@@ -215,10 +213,10 @@ impl AllocTable {
     pub fn insert(&self, record: AllocRecord) -> Result<(), AllocTableError> {
         let mut guard = self.inner.lock().unwrap();
         // Reject if a live record already occupies this slot.
-        if let Some(existing) = guard.records.get(&record.vm_address) {
-            if existing.live {
-                return Err(AllocTableError::AlreadyExists);
-            }
+        if let Some(existing) = guard.records.get(&record.vm_address)
+            && existing.live
+        {
+            return Err(AllocTableError::AlreadyExists);
         }
         guard.total_allocated = guard.total_allocated.saturating_add(1);
         guard.records.insert(record.vm_address, record);

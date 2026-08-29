@@ -4,13 +4,18 @@ pub(crate) mod builtins;
 pub(crate) mod context;
 pub(crate) mod format;
 pub(crate) mod heap;
+pub(crate) mod instrumentation;
 pub(crate) mod limits;
 pub(crate) mod memory;
+pub(crate) mod minifloat;
 pub(crate) mod pointers;
+pub(crate) mod ralloc_record;
+pub(crate) mod ralloc_vec;
 pub(crate) mod stdlib;
 pub(crate) mod sync;
 pub(crate) mod typing;
 pub(crate) mod value;
+pub(crate) mod value_codec;
 pub(crate) mod vm;
 
 pub(crate) use aggregate::{
@@ -20,6 +25,7 @@ pub(crate) use aggregate::{
     runtime_get_field,
     runtime_index,
     runtime_make_array,
+    runtime_make_enum,
     runtime_make_struct,
     runtime_set_field,
     runtime_set_index,
@@ -51,7 +57,7 @@ pub(crate) use arithmetic::{
     runtime_sub,
     runtime_sub_int,
 };
-pub(crate) use builtins::runtime_call_builtin;
+pub(crate) use builtins::{require_builtin_capability, runtime_call_builtin};
 pub(crate) use context::TinyRuntimeContext;
 pub(crate) use format::runtime_print;
 pub use heap::TinyHeapStats;
@@ -63,8 +69,10 @@ pub(crate) use limits::{
     MAX_HEAP_BYTES,
     MAX_HEAP_OBJECTS,
     VALUE_BYTES,
+    VmSettings,
 };
 pub use memory::TinyMemory;
+pub(crate) use minifloat::round_to_kind;
 pub(crate) use pointers::{
     expect_pointer,
     runtime_cast_pointer,
@@ -86,7 +94,6 @@ pub(crate) use pointers::{
     runtime_write_uint,
     validate_pointer_base,
 };
-pub(crate) use sync::{TinyMutex, TinyThreadHandle};
 pub use typing::TypeKind;
 pub(crate) use value::Value;
 pub use value::{HeapRef, RawPointer, RuntimeValue};

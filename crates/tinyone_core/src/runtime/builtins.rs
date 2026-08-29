@@ -3,7 +3,10 @@ use crate::{
     BUILTINS,
     HeapData,
     MAX_ARRAY_LENGTH,
+    ModuleCapability,
+    ModulePermissions,
     Result,
+    TinyMemory,
     TinyOneError,
     TinyRuntimeContext,
     VALUE_BYTES,
@@ -35,10 +38,32 @@ use crate::{
     validate_pointer_base,
 };
 
+pub(crate) fn runtime_len(context: &TinyRuntimeContext, target: &Value) -> Result<Value> {
+    let heap = context.heap();
+    let object = heap.get(target)?;
+    let len = match &object.data {
+        HeapData::Array(values) => values.len(),
+        HeapData::String(text) => crate::runtime::heap::heap_str(text)?.chars().count(),
+        HeapData::Buffer(data) => data.len(),
+        HeapData::Struct(fields) => fields.len(),
+        HeapData::Map(entries) => entries.len(),
+        HeapData::Cell(_) => {
+            return Err(TinyOneError::runtime("len() does not support cell"));
+        }
+        _ => {
+            return Err(TinyOneError::runtime(format!("len() does not support {}", object.kind())));
+        }
+    };
+    Ok(Value::I64(len as i64))
+}
+
 pub(crate) fn runtime_call_builtin(
     context: &mut TinyRuntimeContext,
+    global_memory: &TinyMemory,
     builtin_index: usize,
-    args: Vec<Value>,
+    caller_function: Option<usize>,
+    permissions: &ModulePermissions,
+    args: &[Value],
 ) -> Result<Value> {
     let builtin = BUILTINS
         .get(builtin_index)
@@ -52,25 +77,10 @@ pub(crate) fn runtime_call_builtin(
             args.len()
         )));
     }
+    require_builtin_capability(builtin.name, builtin.requires_unsafe, permissions)?;
+    require_builtin_argument_permissions(context, builtin.name, permissions, args)?;
     match builtin.name {
-        "len" => {
-            let heap = context.heap();
-            let object = heap.get(&args[0])?;
-            let len = match &object.data {
-                HeapData::Array(values) => values.len(),
-                HeapData::String(text) => text.chars().count(),
-                HeapData::Buffer(data) => data.len(),
-                HeapData::Struct(fields) => fields.len(),
-                HeapData::Map(entries) => entries.len(),
-                HeapData::Cell(_) => {
-                    return Err(TinyOneError::runtime("len() does not support cell"));
-                }
-                _ => {
-                    return Err(TinyOneError::runtime(format!("len() does not support {}", object.kind())));
-                }
-            };
-            Ok(Value::I64(len as i64))
-        }
+        "len" => runtime_len(context, &args[0]),
         "array" => {
             let count = checked_bounded_len(expect_int(&args[0], "array")?, "array() length", MAX_ARRAY_LENGTH)?;
             let bytes = checked_payload_bytes(count, VALUE_BYTES, "array()")?;
@@ -81,18 +91,19 @@ pub(crate) fn runtime_call_builtin(
         "load" => {
             let heap = context.heap();
             let object = heap.get(&args[0])?;
-            let HeapData::Cell(value) = &object.data else {
+            let HeapData::Cell(bytes) = &object.data else {
                 return Err(TinyOneError::runtime("load() expects a pointer cell"));
             };
-            Ok(value.clone())
+            Ok(crate::runtime::value_codec::decode_value(bytes.as_slice().try_into().unwrap()))
         }
         "store" => {
             let mut heap = context.heap();
             let object = heap.get_mut(&args[0])?;
-            let HeapData::Cell(value) = &mut object.data else {
+            let HeapData::Cell(bytes) = &mut object.data else {
                 return Err(TinyOneError::runtime("store() expects a pointer cell"));
             };
-            *value = args[1].clone();
+            let encoded = crate::runtime::value_codec::encode_value(&args[1])?;
+            bytes.as_mut_slice().copy_from_slice(&encoded);
             Ok(args[1].clone())
         }
         "free" => {
@@ -142,7 +153,7 @@ pub(crate) fn runtime_call_builtin(
                 }
             }
         }
-        "ptr" => runtime_make_pointer(context, &args),
+        "ptr" => runtime_make_pointer(context, args),
         "fieldptr" => runtime_make_field_pointer(context, &args[0], &args[1]),
         "ptr_addr" => runtime_pointer_address(context, &args[0]),
         "ptr_at" => runtime_pointer_at(context, &args[0]),
@@ -157,7 +168,7 @@ pub(crate) fn runtime_call_builtin(
             }
             let pointer = expect_pointer(&args[0], "is_null")?;
             validate_pointer_base(context, &pointer, "is_null")?;
-            Ok(Value::Bool(pointer.kind == "null" && pointer.address == 0))
+            Ok(Value::Bool(pointer.kind == crate::runtime::value::PointerKind::Null && pointer.address == 0))
         }
         "ptr_eq" => runtime_pointer_eq(context, &args[0], &args[1]),
         "ptr_ne" => {
@@ -259,10 +270,111 @@ pub(crate) fn runtime_call_builtin(
         "u16" => stdlib::b_int_cast(&args[0], crate::TypeKind::U16, "u16"),
         "u32" => stdlib::b_int_cast(&args[0], crate::TypeKind::U32, "u32"),
         "assert" => stdlib::b_assert(&args[0], args.get(1), context),
-        "thread_spawn" => stdlib::b_thread_spawn(context, args),
+        "thread_spawn" => stdlib::b_thread_spawn(context, global_memory, caller_function, args),
         "thread_join" => stdlib::b_thread_join(context, args),
+        "fp8" => stdlib::b_float_cast(&args[0], crate::TypeKind::Fp8, "fp8"),
+        "fp16" => stdlib::b_float_cast(&args[0], crate::TypeKind::Fp16, "fp16"),
+        "fp32" => stdlib::b_float_cast(&args[0], crate::TypeKind::Fp32, "fp32"),
+        "fp64" => stdlib::b_float_cast(&args[0], crate::TypeKind::Fp64, "fp64"),
+        "closure_new" => stdlib::b_closure_new(context, caller_function, &args[0], &args[1]),
+        "closure_function" => stdlib::b_closure_function(context, &args[0]),
+        "closure_captures" => stdlib::b_closure_captures(context, &args[0]),
+        "sum_new" => stdlib::b_sum_new(context, &args[0], args.get(1)),
+        "sum_tag" => stdlib::b_sum_tag(context, &args[0]),
+        "sum_has_payload" => stdlib::b_sum_has_payload(context, &args[0]),
+        "sum_unwrap" => stdlib::b_sum_unwrap(context, &args[0]),
+        "tagged_union_new" => stdlib::b_tagged_union_new(context, &args[0], &args[1]),
+        "tagged_union_tag" => stdlib::b_tagged_union_tag(context, &args[0]),
+        "tagged_union_unwrap" => stdlib::b_tagged_union_unwrap(context, &args[0]),
+        "dyn_new" => stdlib::b_dyn_new(context, &args[0], &args[1], &args[2]),
+        "dyn_type_id" => stdlib::b_dyn_metadata(context, &args[0], false),
+        "dyn_vtable_id" => stdlib::b_dyn_metadata(context, &args[0], true),
+        "dyn_unwrap" => stdlib::b_dyn_unwrap(context, &args[0]),
+        "box_new" => stdlib::b_box_new(context, &args[0]),
+        "box_get" => stdlib::b_box_get(context, &args[0]),
+        "box_set" => stdlib::b_box_set(context, &args[0], &args[1]),
+        "char_new" => stdlib::b_char_new(context, &args[0]),
+        "fd_new" => stdlib::b_fd_new(context, &args[0]),
+        "char_buffer_new" => stdlib::b_char_buffer_new(context, &args[0]),
+        "record_new" => stdlib::b_record_new(context, &args[0]),
+        "dictionary_new" => stdlib::b_dictionary_new(context, &args[0]),
+        "alloc_new" => stdlib::b_alloc_new(context, &args[0], &args[1]),
         _ => Err(TinyOneError::runtime(format!("Missing builtin handler {:?}", builtin.name))),
     }
+}
+
+/// Checks the host authority required by a builtin before it can observe or
+/// affect host state. This remains a runtime check, so untrusted artifact
+/// decoding and JIT lowering cannot bypass the policy applied by the host.
+pub(crate) fn require_builtin_capability(
+    builtin_name: &str,
+    requires_unsafe: bool,
+    permissions: &ModulePermissions,
+) -> Result<()> {
+    let required = match builtin_name {
+        "fs_read" | "fs_write" | "fs_exists" | "fs_list_dir" => Some(ModuleCapability::Filesystem),
+        "sys_env_has" | "sys_env_get" => Some(ModuleCapability::Environment),
+        "thread_spawn" | "thread_join" => Some(ModuleCapability::Threads),
+        // Reserved names let future socket and GPU bridge builtins use the
+        // same manifest contract without a policy migration.
+        "socket_connect" | "socket_listen" | "socket_accept" | "socket_read" | "socket_write" | "tcp_connect"
+        | "udp_bind" => Some(ModuleCapability::Network),
+        "gpu_adapter" | "gpu_device" | "gpu_buffer" | "gpu_submit" | "gpu_present" => Some(ModuleCapability::Graphics),
+        "hardware_enumerate" | "hardware_open" | "serial_open" | "usb_open" => Some(ModuleCapability::Hardware),
+        "pipeline_spawn" | "pipeline_wait" | "pipeline_stdout" => Some(ModuleCapability::LinuxPipelines),
+        _ if requires_unsafe => Some(ModuleCapability::UnsafeMemory),
+        _ => None,
+    };
+    if let Some(required) = required
+        && !permissions.capabilities().allows(required)
+    {
+        return Err(TinyOneError::runtime(format!(
+            "Module capability denied: builtin {builtin_name:?} requires {:?}",
+            required.name()
+        )));
+    }
+    let denied_detail = match builtin_name {
+        "fs_read" | "fs_exists" | "fs_list_dir" => !permissions.allows_filesystem_read(),
+        "fs_write" => !permissions.allows_filesystem_write(),
+        "socket_connect" | "tcp_connect" => !permissions.network_outbound(),
+        "socket_listen" | "socket_accept" | "udp_bind" => !permissions.network_listen(),
+        "socket_read" | "socket_write" => !permissions.network_outbound() && !permissions.network_listen(),
+        "gpu_adapter" | "gpu_device" | "gpu_buffer" | "gpu_submit" | "gpu_present" => !permissions.graphics_gpu(),
+        "hardware_enumerate" | "hardware_open" | "serial_open" | "usb_open" => !permissions.hardware_access(),
+        "pipeline_spawn" => !permissions.process_spawn() || !permissions.linux_pipelines_allowed(),
+        "pipeline_wait" | "pipeline_stdout" => !permissions.linux_pipelines_allowed(),
+        "thread_spawn" | "thread_join" => !permissions.threads_allowed(),
+        _ if requires_unsafe => !permissions.unsafe_memory_allowed(),
+        _ => false,
+    };
+    if denied_detail {
+        return Err(TinyOneError::runtime(format!(
+            "Module permission denied: builtin {builtin_name:?} is outside the signed module declaration"
+        )));
+    }
+    Ok(())
+}
+
+/// Enforces permissions whose target is known only after evaluating builtin
+/// arguments.  The value is checked before the stdlib handler reads host
+/// state, so neither `sys_env_has` nor `sys_env_get` can probe an undeclared
+/// variable.
+fn require_builtin_argument_permissions(
+    context: &TinyRuntimeContext,
+    builtin_name: &str,
+    permissions: &ModulePermissions,
+    args: &[Value],
+) -> Result<()> {
+    if !matches!(builtin_name, "sys_env_has" | "sys_env_get") {
+        return Ok(());
+    }
+    let name = expect_string(context, &args[0], builtin_name)?;
+    if permissions.allows_environment_read(&name) {
+        return Ok(());
+    }
+    Err(TinyOneError::runtime(format!(
+        "Module permission denied: builtin {builtin_name:?} may not read environment variable {name:?}"
+    )))
 }
 
 fn looks_like_int(text: &str) -> bool {
