@@ -1,3 +1,7 @@
+---
+title: Examples
+---
+
 # TinyOne Examples
 
 Runnable examples organized by feature. Each example shows the `.to` source and the expected stdout output. Run any example with:

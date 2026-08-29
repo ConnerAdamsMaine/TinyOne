@@ -1,3 +1,7 @@
+---
+title: FFI Reference
+---
+
 # FFI Integration
 
 TinyOne compiles to a shared library (`libtinyone.so` / `.dylib` / `.dll`)

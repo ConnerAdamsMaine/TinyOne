@@ -57,8 +57,9 @@ Working on the TinyOne runtime implementation:
   workloads, baselines, and priorities.
 - [Memory Model](memory-model.rst) \-- heap slab, generation tags,
   ownership rules, and resource limits.
-- [Contributing Guide](contributing.md) \-- build, test, adding
+- [Contributing Guide](CONTRIBUTING.md) \-- build, test, adding
   features, builtins, and stdlib modules.
+- [CI/CD](CI_CD.md) \-- toolchain pinning, workflows, and version policy.
 - [v2 Roadmap](v2-roadmap.rst) \-- current language-generation
   commitments and implementation tracks.
 - [Community Forum](Community_Forum.md) \-- request, proposal, and
@@ -72,7 +73,7 @@ available forever.
 
 - [abi/contract.md](abi/contract.md) \-- Runtime invariants: panic
   boundary, null safety, ownership, and thread safety.
-- [abi/index.rst](abi/index.rst) \-- ABI area navigation.
+- [abi/INDEX.md](abi/INDEX.md) \-- ABI area navigation.
 - [abi/schemas.md](abi/schemas.md) \-- JSON response schemas per entry
   point.
 - [abi/versioning.md](abi/versioning.md) \-- Frozen v1 policy and v2
@@ -86,12 +87,12 @@ available forever.
 - [bytecode.md](bytecode.md) \-- Opcode table, artifact format, verifier
   rules, and JIT adaptive tier.
 - [cli.md](cli.md) \-- CLI flags and workflow examples.
-- [contributing.md](contributing.md) \-- Build, test, adding language
+- [CONTRIBUTING.md](CONTRIBUTING.md) \-- Build, test, adding language
   features, builtins, and stdlib modules.
-- [examples.md](examples.md) \-- Runnable TinyLang programs by feature.
+- [EXAMPLES.md](EXAMPLES.md) \-- Runnable TinyLang programs by feature.
 - [ffi/c-integration.md](ffi/c-integration.md) \-- C embedding guide:
   build, link, entry points, ownership, and threading.
-- [ffi/index.rst](ffi/index.rst) \-- FFI area navigation.
+- [ffi/INDEX.md](ffi/INDEX.md) \-- FFI area navigation.
 - [ffi/rust-api.md](ffi/rust-api.md) \-- Rust crate public API: compile,
   run, JIT, artifacts, and verification.
 - [memory-model.rst](memory-model.rst) \-- Heap slab, `HeapRef`
@@ -104,7 +105,7 @@ available forever.
   bridge reference.
 - [syntax/expressions.md](syntax/expressions.md) \-- Operators,
   precedence table, arithmetic, comparisons, and unsafe gate.
-- [syntax/index.rst](syntax/index.rst) \-- Syntax area navigation.
+- [syntax/INDEX.md](syntax/INDEX.md) \-- Syntax area navigation.
 - [syntax/modules.md](syntax/modules.md) \-- Import/export, path
   resolution, `tinyone.json` manifest, and worked example.
 - [syntax/statements.md](syntax/statements.md) \-- Every statement form

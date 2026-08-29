@@ -383,7 +383,7 @@ design.
 
 The main documentation tree is `docs/`:
 
-- `docs/index.rst` routes readers by audience
+- `docs/INDEX.md` routes readers by audience
 - `docs/syntax/` describes syntax
 - `docs/abi/` describes ABI contracts and versioning
 - `docs/ffi/` describes C and Rust integration

@@ -1,3 +1,7 @@
+---
+title: Architecture
+---
+
 # TinyOne Implementation Architecture
 
 This document describes the current implementation, not a permanent
