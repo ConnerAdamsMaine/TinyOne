@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_FFI = ROOT / "TinyOne" / "src" / "ffi.rs"
+DEFAULT_FFI = ROOT / "crates" / "tinyone_core" / "src" / "ffi.rs"
 DEFAULT_GENERATED_HEADER = ROOT / "tinylang.h"
 DEFAULT_HEADER = DEFAULT_GENERATED_HEADER
 DEFAULT_CBINDGEN_CONFIG = ROOT / "cbindgen.toml"

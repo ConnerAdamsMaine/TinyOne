@@ -44,7 +44,7 @@ jobs:
 
       - name: "Cargo test (workspace)"
         shell: "bash"
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1
 
       - name: "Language suite (testing-hooks)"
         shell: "bash"
