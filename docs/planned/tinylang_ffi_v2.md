@@ -1,3 +1,7 @@
+---
+title: TinyLang FFI v2
+---
+
 # TinyLang FFI v2 — Unified Typed C ABI
 
 - **Status:** Draft / Planned

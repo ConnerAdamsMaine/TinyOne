@@ -1,3 +1,7 @@
+---
+title: Performance
+---
+
 # TinyOne performance workflow
 
 `tinylang-bench` is the performance regression and optimization-targeting

@@ -1,3 +1,7 @@
+---
+title: C Integration
+---
+
 # TinyOne C FFI Integration Guide
 
 TinyOne builds as a `cdylib` alongside the CLI binary. All public entry points
