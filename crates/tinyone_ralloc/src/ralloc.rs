@@ -178,6 +178,7 @@ pub(crate) fn reallocate_aligned(ptr: *mut c_void, size: usize, align: usize) ->
     new_ptr.cast::<c_void>()
 }
 
+// PERF: We can do this via binary/bitwise operations instead
 pub(crate) const fn is_supported_native_alignment(align: usize) -> bool {
     align != 0 && align.is_power_of_two() && align <= MAX_NATIVE_ALIGNMENT
 }
@@ -298,7 +299,7 @@ pub unsafe extern "C" fn ralloc_realloc(ptr: *mut c_void, size: usize) -> *mut c
 }
 
 #[cfg(test)]
-fn reset_for_tests() {
+pub(crate) fn reset_for_tests() {
     for arena in &ARENAS {
         *arena.lock() = ArenaState::new();
     }

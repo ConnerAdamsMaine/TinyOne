@@ -116,9 +116,12 @@ impl VmAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ralloc, region};
 
     #[test]
     fn allocate_and_deallocate_round_trips() {
+        let _guard = region::TEST_LOCK.lock();
+        ralloc::reset_for_tests();
         let vm = VmAllocator::global();
         let mut alloc = vm.allocate(64).expect("allocation should succeed");
         assert_eq!(alloc.len(), 64);
@@ -129,6 +132,8 @@ mod tests {
 
     #[test]
     fn reallocate_preserves_existing_bytes() {
+        let _guard = region::TEST_LOCK.lock();
+        ralloc::reset_for_tests();
         let vm = VmAllocator::global();
         let mut alloc = vm.allocate(16).expect("allocation should succeed");
         alloc.as_mut_slice().copy_from_slice(&[7u8; 16]);
@@ -144,6 +149,8 @@ mod tests {
 
     #[test]
     fn reallocate_failure_returns_original_untouched() {
+        let _guard = region::TEST_LOCK.lock();
+        ralloc::reset_for_tests();
         let vm = VmAllocator::global();
         let alloc = vm.allocate(8).expect("allocation should succeed");
 
@@ -160,6 +167,8 @@ mod tests {
 
     #[test]
     fn allocate_past_capacity_returns_err_not_panic() {
+        let _guard = region::TEST_LOCK.lock();
+        ralloc::reset_for_tests();
         let vm = VmAllocator::global();
         let result = vm.allocate(VmAllocator::capacity() * 2);
         assert!(result.is_err(), "oversized allocation must error, not panic");
