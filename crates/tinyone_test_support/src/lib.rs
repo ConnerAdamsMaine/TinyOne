@@ -27,3 +27,12 @@ pub fn workspace_target_dir(manifest_dir: &str, profile: &str) -> PathBuf {
         manifest.join(format!("target/{profile}"))
     }
 }
+
+/// Asserts that a `Result` is `Err` and that the error string contains `needle`.
+pub fn expect_error_contains<T, E: std::fmt::Display>(result: Result<T, E>, needle: &str) {
+    let error = match result {
+        Ok(_) => panic!("operation should fail"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains(needle), "expected error to contain {needle:?}, got {error:?}");
+}
