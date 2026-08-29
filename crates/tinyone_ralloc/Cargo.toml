@@ -13,18 +13,12 @@ crate-type = [ "rlib", "cdylib" ]
 
 [features]
 default       = [ "rlib" ]
-rlib          = [  ]
-cdylib        = [  ]
-c-staticlib   = [  ]
-testing-hooks = [  ]
+rlib          = []
+cdylib        = []
+c-staticlib   = []
+testing-hooks = []
 
 [dependencies]
 
 [dev-dependencies]
 static_assertions = "1"
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"

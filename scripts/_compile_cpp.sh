@@ -36,11 +36,11 @@ _compile_msvc() {
   _args=(
     "${_common_msvc_flags[@]}"
     /std:c++17
-    /c "${ROOT_DIR}/tests/consumers/tinylang_consumer.cpp"
-    /Fo:"${BUILD_DIR}/tinylang_consumer_cpp.obj"
+    /c "$(_to_win_path "${ROOT_DIR}/tests/consumers/tinylang_consumer.cpp")"
+    /Fo:"${BUILD_DIR_WIN}/tinylang_consumer_cpp.obj"
   )
   pushd "${BUILD_DIR}" >/dev/null
-  cl.exe "${_args[@]}"
+  MSYS2_ARG_CONV_EXCL="*" cl.exe "${_args[@]}"
   popd >/dev/null
 }
 
