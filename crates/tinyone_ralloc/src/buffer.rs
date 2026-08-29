@@ -122,6 +122,9 @@ impl RallocBuffer {
             return Ok(());
         }
 
+        #[cfg(any(test, feature = "testing-hooks"))]
+        let grew = new_len > self.len;
+
         if new_len == 0 {
             self.deallocate();
             self.ptr = NonNull::dangling();
@@ -135,6 +138,10 @@ impl RallocBuffer {
             self.len = buffer.len;
             self.align = buffer.align;
             core::mem::forget(buffer);
+            #[cfg(any(test, feature = "testing-hooks"))]
+            if grew {
+                crate::instrumentation::record_growth();
+            }
             return Ok(());
         }
 
@@ -145,6 +152,10 @@ impl RallocBuffer {
 
         self.ptr = ptr;
         self.len = new_len;
+        #[cfg(any(test, feature = "testing-hooks"))]
+        if grew {
+            crate::instrumentation::record_growth();
+        }
         Ok(())
     }
 

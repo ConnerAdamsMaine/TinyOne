@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct InstrumentationSnapshot {
     pub(crate) growth_events: u64,
-    pub(crate) bytes_copied: u64,
+    pub(crate) bytes_copied:  u64,
 }
 
 static GROWTH_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -22,7 +22,7 @@ pub(crate) fn record_bytes_copied(bytes: usize) {
 pub(crate) fn snapshot() -> InstrumentationSnapshot {
     InstrumentationSnapshot {
         growth_events: GROWTH_EVENTS.load(Ordering::Relaxed),
-        bytes_copied: BYTES_COPIED.load(Ordering::Relaxed),
+        bytes_copied:  BYTES_COPIED.load(Ordering::Relaxed),
     }
 }
 

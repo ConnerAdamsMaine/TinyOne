@@ -231,10 +231,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ralloc"
-version = "0.2.0"
-
-[[package]]
 name = "rand_core"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -390,11 +386,11 @@ dependencies = [
  "blake2",
  "ed25519-dalek",
  "hex",
- "ralloc",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "tinyone_ralloc",
  "toml",
 ]
 
@@ -404,7 +400,7 @@ version = "0.1.0"
 
 [[package]]
 name = "tinyone_ralloc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "static_assertions",
 ]

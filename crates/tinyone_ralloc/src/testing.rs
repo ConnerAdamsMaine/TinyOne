@@ -6,7 +6,7 @@ pub struct InstrumentationSnapshot {
     /// Successful buffer growth operations.
     pub growth_events: u64,
     /// Bytes copied while moving live allocations during growth.
-    pub bytes_copied: u64,
+    pub bytes_copied:  u64,
 }
 
 /// Returns the current process-wide allocator instrumentation counters.
@@ -14,7 +14,7 @@ pub fn instrumentation_snapshot() -> InstrumentationSnapshot {
     let snapshot = crate::instrumentation::snapshot();
     InstrumentationSnapshot {
         growth_events: snapshot.growth_events,
-        bytes_copied: snapshot.bytes_copied,
+        bytes_copied:  snapshot.bytes_copied,
     }
 }
 
