@@ -77,6 +77,21 @@ pub fn workspace_target_dir(manifest_dir: &str, profile: &str) -> PathBuf {
     }
 }
 
+/// Asserts that a `Result` is `Err` and that the error string contains `needle`.
+///
+/// # Panics
+/// If the result is `Ok(_)` or if the error string does not contain `needle`.
+pub fn expect_error_contains<T, E: std::fmt::Display>(result: Result<T, E>, needle: &str) {
+    let error = match result {
+        Ok(_) => panic!("operation should fail"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains(needle),
+        "expected error to contain {needle:?}, got {error:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::{cargo_toml_declares_workspace, repo_root_from_manifest};
@@ -96,13 +111,4 @@ mod tests {
         let text = std::fs::read_to_string(&cargo).expect("read workspace Cargo.toml");
         assert!(cargo_toml_declares_workspace(&text), "{}", cargo.display());
     }
-}
-
-/// Asserts that a `Result` is `Err` and that the error string contains `needle`.
-pub fn expect_error_contains<T, E: std::fmt::Display>(result: Result<T, E>, needle: &str) {
-    let error = match result {
-        Ok(_) => panic!("operation should fail"),
-        Err(error) => error.to_string(),
-    };
-    assert!(error.contains(needle), "expected error to contain {needle:?}, got {error:?}");
 }
