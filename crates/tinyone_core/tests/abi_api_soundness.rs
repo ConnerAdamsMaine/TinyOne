@@ -524,7 +524,10 @@ int main(void) {
     .expect("write C FFI smoke source");
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repo_root = manifest_dir.join("../../").canonicalize().unwrap_or_else(|_| manifest_dir.join("../../").to_path_buf());
+    let repo_root = manifest_dir
+        .join("../../")
+        .canonicalize()
+        .unwrap_or_else(|_| manifest_dir.join("../../").to_path_buf());
     let sandbox_worker = Path::new(env!("CARGO_BIN_EXE_tinyone-sandbox-worker"));
     let target_dir = sandbox_worker.parent().expect("Cargo sandbox worker path has a parent");
     let dylib = target_dir.join(format!("{}tinyone{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX));

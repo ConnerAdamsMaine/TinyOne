@@ -24,7 +24,10 @@ fn release_build_emits_c_linkable_library_artifacts() {
     // Check both locations; prefer crate-local if present for non-workspace builds.
     let crate_release = Path::new(manifest_dir).join("target/release");
     let workspace_release = Path::new(manifest_dir).join("../../target/release");
-    let release_dir = if crate_release.join(if cfg!(windows) { "ralloc.lib" } else { "libralloc.a" }).is_file() {
+    let release_dir = if crate_release
+        .join(if cfg!(windows) { "ralloc.lib" } else { "libralloc.a" })
+        .is_file()
+    {
         crate_release
     } else {
         workspace_release
