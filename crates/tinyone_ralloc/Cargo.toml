@@ -13,10 +13,10 @@ crate-type = [ "rlib", "cdylib", "staticlib" ]
 
 [features]
 default       = [ "rlib" ]
-rlib          = []
-cdylib        = []
-c-staticlib   = []
-testing-hooks = []
+rlib          = [  ]
+cdylib        = [  ]
+c-staticlib   = [  ]
+testing-hooks = [  ]
 
 [dependencies]
 
