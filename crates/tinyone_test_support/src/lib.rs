@@ -61,10 +61,16 @@ fn find_workspace_root(start: &Path) -> Result<PathBuf, String> {
 ///
 /// `Path::canonicalize` on Windows yields a `\\?\` verbatim prefix. gcc does
 /// not search those include dirs, so `tinylang.h` looks missing.
+/// Extended UNC (`\\?\UNC\server\share`) is mapped to `\\server\share`.
 #[must_use]
 pub fn native_cc_path(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
-    PathBuf::from(raw.strip_prefix(r"\\?\").unwrap_or(raw.as_ref()))
+    let raw = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        raw.strip_prefix(r"\\?\").unwrap_or(raw.as_ref()).to_owned()
+    };
+    PathBuf::from(raw)
 }
 
 /// Workspace `target/<profile>` directory.
@@ -123,6 +129,8 @@ mod tests {
     fn native_cc_path_strips_windows_verbatim_prefix() {
         let verbatim = Path::new(r"\\?\C:\work\TinyOne");
         assert_eq!(native_cc_path(verbatim), Path::new(r"C:\work\TinyOne"));
+        let unc = Path::new(r"\\?\UNC\server\share\repo");
+        assert_eq!(native_cc_path(unc), Path::new(r"\\server\share\repo"));
         let unix = Path::new("/home/dwarf/TinyOne");
         assert_eq!(native_cc_path(unix), unix);
     }
