@@ -57,6 +57,22 @@ fn find_workspace_root(start: &Path) -> Result<PathBuf, String> {
     walk_to_workspace(start)
 }
 
+/// Path that MinGW/`cc` will accept for `-I`/`-L` on Windows.
+///
+/// `Path::canonicalize` on Windows yields a `\\?\` verbatim prefix. gcc does
+/// not search those include dirs, so `tinylang.h` looks missing.
+/// Extended UNC (`\\?\UNC\server\share`) is mapped to `\\server\share`.
+#[must_use]
+pub fn native_cc_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    let raw = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        raw.strip_prefix(r"\\?\").unwrap_or(raw.as_ref()).to_owned()
+    };
+    PathBuf::from(raw)
+}
+
 /// Workspace `target/<profile>` directory.
 ///
 /// Prefers `CARGO_TARGET_DIR`, then `<workspace>/target/<profile>`, then
@@ -89,7 +105,9 @@ pub fn expect_error_contains<T, E: std::fmt::Display>(result: Result<T, E>, need
 
 #[cfg(test)]
 mod tests {
-    use super::{cargo_toml_declares_workspace, repo_root_from_manifest};
+    use std::path::Path;
+
+    use super::{cargo_toml_declares_workspace, native_cc_path, repo_root_from_manifest};
 
     #[test]
     fn detects_workspace_table() {
@@ -105,5 +123,15 @@ mod tests {
         let cargo = root.join("Cargo.toml");
         let text = std::fs::read_to_string(&cargo).expect("read workspace Cargo.toml");
         assert!(cargo_toml_declares_workspace(&text), "{}", cargo.display());
+    }
+
+    #[test]
+    fn native_cc_path_strips_windows_verbatim_prefix() {
+        let verbatim = Path::new(r"\\?\C:\work\TinyOne");
+        assert_eq!(native_cc_path(verbatim), Path::new(r"C:\work\TinyOne"));
+        let unc = Path::new(r"\\?\UNC\server\share\repo");
+        assert_eq!(native_cc_path(unc), Path::new(r"\\server\share\repo"));
+        let unix = Path::new("/home/dwarf/TinyOne");
+        assert_eq!(native_cc_path(unix), unix);
     }
 }
