@@ -509,9 +509,16 @@ int main(void) {
     .expect("write C FFI smoke source");
 
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let repo_root = tinyone_test_support::repo_root_from_manifest(manifest_dir);
-    let sandbox_worker = Path::new(env!("CARGO_BIN_EXE_tinyone-sandbox-worker"));
-    let target_dir = sandbox_worker.parent().expect("Cargo sandbox worker path has a parent");
+    let repo_root = tinyone_test_support::native_cc_path(&tinyone_test_support::repo_root_from_manifest(manifest_dir));
+    let sandbox_worker = tinyone_test_support::native_cc_path(Path::new(env!("CARGO_BIN_EXE_tinyone-sandbox-worker")));
+    let target_dir =
+        tinyone_test_support::native_cc_path(sandbox_worker.parent().expect("Cargo sandbox worker path has a parent"));
+    let source = tinyone_test_support::native_cc_path(&source);
+    let exe = tinyone_test_support::native_cc_path(&exe);
+    let header = repo_root.join("tinylang.h");
+    assert!(header.is_file(), "missing C header at {}", header.display());
+    fs::copy(&header, source.parent().expect("smoke source has a parent").join("tinylang.h"))
+        .expect("copy tinylang.h into smoke dir");
     let dylib = target_dir.join(format!("{}tinyone{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX));
     if !dylib.exists() {
         eprintln!("skipping C FFI smoke: cdylib not found at {} — run `cargo build` first", dylib.display());
@@ -529,10 +536,10 @@ int main(void) {
         .arg("-Wall")
         .arg("-Wextra")
         .arg("-I")
-        .arg(repo_root)
+        .arg(&repo_root)
         .arg(&source)
         .arg("-L")
-        .arg(target_dir)
+        .arg(&target_dir)
         .arg(format!("-Wl,-rpath,{}", target_dir.display()))
         .arg("-ltinyone")
         .arg("-o")
@@ -549,11 +556,17 @@ int main(void) {
     // Cargo exposes the exact executable built for each binary target to
     // integration tests. Supplying it explicitly avoids relying on incidental
     // target-directory layout, which differs between platforms and runners.
-    let run = Command::new(&exe)
-        .env("LD_LIBRARY_PATH", target_dir)
-        .env("TINYONE_SANDBOX_WORKER", sandbox_worker)
-        .output()
-        .expect("run C FFI smoke");
+    let mut run = Command::new(&exe);
+    run.env("LD_LIBRARY_PATH", &target_dir)
+        .env("TINYONE_SANDBOX_WORKER", &sandbox_worker);
+    if let Some(path) = std::env::var_os("PATH") {
+        let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+        paths.insert(0, target_dir.clone());
+        if let Ok(joined) = std::env::join_paths(paths) {
+            run.env("PATH", joined);
+        }
+    }
+    let run = run.output().expect("run C FFI smoke");
     assert!(
         run.status.success(),
         "C FFI smoke failed\nstdout:\n{}\nstderr:\n{}",
