@@ -1,6 +1,5 @@
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 const WORKSPACE_DIR_ENV: &str = "CARGO_WORKSPACE_DIR";
 
@@ -14,8 +13,7 @@ fn cargo_toml_declares_workspace(text: &str) -> bool {
 
 fn is_workspace_root(dir: &Path) -> bool {
     let cargo = dir.join("Cargo.toml");
-    cargo.is_file()
-        && fs::read_to_string(&cargo).is_ok_and(|text| cargo_toml_declares_workspace(&text))
+    cargo.is_file() && fs::read_to_string(&cargo).is_ok_and(|text| cargo_toml_declares_workspace(&text))
 }
 
 /// Walk `start` and its parents until a `Cargo.toml` with `[workspace]` is found.
@@ -86,10 +84,7 @@ pub fn expect_error_contains<T, E: std::fmt::Display>(result: Result<T, E>, need
         Ok(_) => panic!("operation should fail"),
         Err(error) => error.to_string(),
     };
-    assert!(
-        error.contains(needle),
-        "expected error to contain {needle:?}, got {error:?}"
-    );
+    assert!(error.contains(needle), "expected error to contain {needle:?}, got {error:?}");
 }
 
 #[cfg(test)]
