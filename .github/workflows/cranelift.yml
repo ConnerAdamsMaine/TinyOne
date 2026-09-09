@@ -19,6 +19,9 @@ env:
   RUST_BACKTRACE: "1"
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
+  CARGO_UNSTABLE_CODEGEN_BACKEND: "true"
+  CARGO_PROFILE_DEV_CODEGEN_BACKEND: "cranelift"
+  CARGO_PROFILE_TEST_CODEGEN_BACKEND: "cranelift"
 
 jobs:
   cranelift:
@@ -36,20 +39,58 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: "Setup Rust (with cranelift codegen)"
+      # rust-toolchain.toml pins stable without cranelift. Drop it so rustup
+      # uses the explicit nightly input (same pattern as nightly.yml).
+      - name: "Remove stable toolchain pin"
+        shell: "bash"
+        run: rm -f rust-toolchain.toml
+
+      - name: "Setup Rust (nightly + cranelift)"
         uses: "./.github/actions/setup-rust"
         with:
           target: "${{ matrix.target }}"
-          # rust-toolchain.toml already enables rustc-codegen-cranelift
+          toolchain: "nightly"
+          components: "rustc-codegen-cranelift"
+
+      - name: "Confirm cranelift backend is installed"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          sysroot="$(rustc --print sysroot)"
+          host="$(rustc --print host-tuple 2>/dev/null || rustc -vV | awk '/^host:/{print $2}')"
+          backends="${sysroot}/lib/rustlib/${host}/codegen-backends"
+          echo "codegen-backends dir: ${backends}"
+          ls -la "${backends}"
+          ls "${backends}" | grep -qi cranelift
+
+      # curve25519-dalek still compiles AVX-512 kernels and cranelift traps
+      # on them (rustc_codegen_cranelift#171). Keep mold flags from setup.
+      - name: "Use serial curve25519 backend"
+        shell: "bash"
+        run: |
+          extra='--cfg curve25519_dalek_backend="serial"'
+          echo "RUSTFLAGS=${RUSTFLAGS:+${RUSTFLAGS} }${extra}" >> "$GITHUB_ENV"
 
       - name: "Build with cranelift backend"
         shell: "bash"
-        run: cargo build --workspace
+        run: cargo -Zcodegen-backend build --workspace
 
       - name: "Test with cranelift backend"
         shell: "bash"
-        run: cargo test --workspace
-
-      - name: "Rust codegen cranelift available"
-        shell: "bash"
-        run: rustc --print codegen-backends | grep -i cranelift || (echo "cranelift backend not available" && exit 1)
+        # Cranelift gaps covered by the LLVM test workflow:
+        # - catch_unwind is experimental (panicking VM hook)
+        # - x86 LFENCE/RDTSC trap (rustc_codegen_cranelift#171)
+        # - Windows cranelift is panic=abort, so #[should_panic] aborts the process
+        run: |
+          set -euo pipefail
+          extra=(
+            --skip panicking_hook
+            --skip thread_cycle_counter_advances_during_cpu_work
+          )
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            extra+=(
+              --skip push_wrong_stride_panics
+              --skip compatibility_type_conversion_rejects_heap_references
+            )
+          fi
+          cargo -Zcodegen-backend test --workspace -- --test-threads=1 "${extra[@]}"
