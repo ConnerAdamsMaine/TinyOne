@@ -8,8 +8,8 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys   = "0.4"
-tinylang        = { package = "tinylang-v2", path = ".." }
+libfuzzer-sys = "0.4"
+tinylang      = { package = "tinylang-v2", path = ".." }
 
 [[bin]]
 name  = "frame"
